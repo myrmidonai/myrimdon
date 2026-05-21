@@ -11,7 +11,8 @@ export interface TemplateOptions {
 }
 
 export function generateConfig(opts: TemplateOptions): string {
-  return `import { defineConfig } from 'myrmidon';
+  return `// @ts-ignore — defineConfig is a passthrough type helper
+const defineConfig = (c) => c;
 
 export default defineConfig({
   project: {
