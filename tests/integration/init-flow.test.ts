@@ -13,7 +13,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 let tmpDir: string;
-afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); vi.restoreAllMocks(); });
+afterEach(() => {
+  try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore Windows EPERM on open DB handles */ }
+  vi.restoreAllMocks();
+});
 
 describe('myrmidon init (direct mode)', () => {
   it('creates a complete project structure and valid config', async () => {

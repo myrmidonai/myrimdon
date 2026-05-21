@@ -46,8 +46,26 @@ export class OpenCodeAdapter implements RuntimeAdapter {
   }
 }
 
+export class GeminiCliAdapter implements RuntimeAdapter {
+  readonly runtimeId: RuntimeId = 'gemini-cli';
+
+  async spawn(_opts: SpawnOpts): Promise<SpawnedProcess> {
+    throw new Error('Gemini CLI runtime is not yet implemented');
+  }
+}
+
+export class KimiCodexAdapter implements RuntimeAdapter {
+  readonly runtimeId: RuntimeId = 'kimi-codex';
+
+  async spawn(_opts: SpawnOpts): Promise<SpawnedProcess> {
+    throw new Error('Kimi Codex runtime is not yet implemented');
+  }
+}
+
 export function createRuntimeAdapter(runtimeId: RuntimeId): RuntimeAdapter {
   if (runtimeId === 'claude-code') return new ClaudeCodeAdapter();
   if (runtimeId === 'opencode') return new OpenCodeAdapter();
+  if (runtimeId === 'gemini-cli') return new GeminiCliAdapter();
+  if (runtimeId === 'kimi-codex') return new KimiCodexAdapter();
   throw new Error(`Unsupported runtime: ${runtimeId}`);
 }

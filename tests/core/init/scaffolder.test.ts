@@ -14,7 +14,9 @@ const baseOpts = {
 };
 
 let tmpDir: string;
-afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+afterEach(() => {
+  try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore Windows EPERM on open DB handles */ }
+});
 
 describe('scaffold', () => {
   it('creates required directories', () => {
