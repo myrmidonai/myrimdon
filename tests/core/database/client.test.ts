@@ -57,4 +57,28 @@ describe('openDatabase', () => {
     expect(row[0]?.journal_mode).toBe('wal');
     db.close();
   });
+
+  it('creates the 4 new workflow engine tables (schema v2)', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'engine-test-'));
+    const db = openDatabase(tmpDir);
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all()
+      .map((r: unknown) => (r as { name: string }).name);
+    expect(tables).toContain('workflows');
+    expect(tables).toContain('workflow_runs');
+    expect(tables).toContain('node_executions');
+    expect(tables).toContain('artifacts');
+    db.close();
+  });
+
+  it('sets schema_version to 2 in the meta table', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'engine-test-'));
+    const db = openDatabase(tmpDir);
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
+      | { value: string }
+      | undefined;
+    expect(row?.value).toBe('2');
+    db.close();
+  });
 });

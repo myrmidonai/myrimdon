@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const CREATE_TABLES = `
 CREATE TABLE IF NOT EXISTS workflow (
@@ -94,3 +94,48 @@ CREATE TABLE IF NOT EXISTS meta (
 
 INSERT OR IGNORE INTO workflow (id, state) VALUES (1, 'IDLE');
 `;
+
+export const MIGRATIONS: Record<number, string> = {
+  2: `
+    CREATE TABLE IF NOT EXISTS workflows (
+      id          TEXT PRIMARY KEY,
+      version     TEXT NOT NULL,
+      name        TEXT NOT NULL,
+      def_json    TEXT NOT NULL,
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS workflow_runs (
+      id            TEXT PRIMARY KEY,
+      workflow_id   TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      started_at    TEXT NOT NULL,
+      completed_at  TEXT,
+      context_json  TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS node_executions (
+      id            TEXT PRIMARY KEY,
+      run_id        TEXT NOT NULL,
+      node_id       TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      attempt       INTEGER DEFAULT 1,
+      agent_id      TEXT,
+      started_at    TEXT,
+      completed_at  TEXT,
+      error         TEXT,
+      output_json   TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS artifacts (
+      id           TEXT PRIMARY KEY,
+      workflow_id  TEXT NOT NULL,
+      run_id       TEXT NOT NULL,
+      node_id      TEXT NOT NULL,
+      file_path    TEXT NOT NULL,
+      status       TEXT NOT NULL,
+      created_at   TEXT NOT NULL
+    );
+  `,
+};
