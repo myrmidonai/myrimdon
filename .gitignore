@@ -1,0 +1,11 @@
+*
+
+!.gitignore
+!.github/
+
+!/*.md
+!/*.ts
+!/*.json
+!/src/
+!/tests/
+!/.superpowers
