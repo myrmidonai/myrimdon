@@ -141,16 +141,25 @@ $ myrmidon init
 
 ? Worktree 基础端口（当前端口冲突时可修改）: 31000
 
-? Agent 运行时:
-  ❯ Claude Code (claude-code)
-    （更多运行时即将支持）
+? Agent 运行时:  （正在检测已安装的运行时...）
+  ✓ claude-code  v1.2.3
+  ✗ opencode     未安装
+  ✗ gemini-cli   未安装
+
+  仅检测到 1 个运行时，自动选择 claude-code。
+  （若需混合多 runtime，安装后重新运行 myrmidon init 或手动编辑 myrmidon.config.ts）
+
+  检测到多个时示例:
+  ❯ Claude Code   (claude-code)   v1.2.3
+    OpenCode      (opencode)      v0.3.1
+    Gemini CLI    (gemini-cli)    v0.2.0
 
 以下配置将被创建:
   目录:   ./my-ecommerce/
   语言:   zh
   模板:   default
   端口:   31000
-  运行时: claude-code
+  运行时: claude-code（自动检测）
 
 ? 确认初始化？ (Y/n)
 ```
@@ -169,7 +178,9 @@ $ myrmidon init
 | `.claude/rules/` | 生成全套规则文件 | 仅添加缺失的规则文件，已有文件不覆盖 |
 | `.myrmidon/prompts/{role}.md` | 生成（每个内置角色各一个） | 仅添加缺失角色文件 |
 | `git init` / develop 分支 | ✅ 执行 | ❌ 跳过（已有 repo） |
-| `.gitignore` | 生成 | 追加缺失条目（`.myrmidon/runtime/` 等），不覆盖 |
+| `.gitignore` | 生成（含 `.env`、`.myrmidon/runtime/`、`.myrmidon/logs/`） | 追加缺失条目，不覆盖 |
+| `.env.example` | 生成（含所有必填 key，值留空） | 追加缺失 key，已有 key 不覆盖 |
+| `.env` | 不创建（用户手动复制 `.env.example` 填值） | 不创建 |
 | template 检测 | 由 `--template` 指定 | 自动推断（检测 `apps/`、`package.json workspaces` 等） |
 
 **已有项目迁移原则:**
@@ -427,40 +438,164 @@ dispatch 前:
 
 ## 3. TUI 界面设计
 
-TUI 基于 [Ink](https://github.com/vadimdemedes/ink)（React for CLIs）实现，分为以下布局区域：
+TUI 基于 [Ink](https://github.com/vadimdemedes/ink)（React for CLIs）实现，支持鼠标点击与键盘双模式操作。
+
+### 3.1 整体结构
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ MYRMIDON  project: my-ecommerce  phase: Development  sprint: 02 │
-├───────────────────────────┬─────────────────────────────────────┤
-│  WORKFLOW                 │  AGENT MONITOR                      │
-│  ✅ Requirements          │  orchestrator  🟢 Polling 28s       │
-│  ✅ Review                │  pm            ✅ Idle               │
-│  ✅ Wireframe + PRD       │  arch          ✅ Idle               │
-│  ✅ Detailed Design       │  coder1        🟡 task-007          │
-│  ✅ UI Design             │  coder2        🟡 task-008          │
-│  ▶ Development            │  qa            ⚪ Waiting           │
-│    └ sprint-02 (3/5)     │  security      ✅ Idle               │
-│  ○ QA Testing             │  ui            ✅ Idle               │
-│  ○ Delivery               ├─────────────────────────────────────┤
-├───────────────────────────┤  WORKTREES & PORTS                  │
-│  CLIENT CHAT              │  feature/task-007  :4100  🟡        │
-│  > 甲方消息在此显示        │  feature/task-008  :4200  🟡        │
-│  < 乙方回复在此显示        ├─────────────────────────────────────┤
-│                           │  LOG                                │
-│  [Type to respond...]     │  [info] coder1: task-007 progress   │
-│                           │  [info] coder2: API schema done     │
-└───────────────────────────┴─────────────────────────────────────┘
-[q]Quit  [r]Refresh  [Tab]Focus  [↑↓]Scroll  [Enter]Select  [?]Help
+MYRMIDON  <project>  ▶ <sprint>  📅 Day X/Y  ⏰ ±Nd
+──────────────────────────────────────────────────────────────────────
+1 Overview  2 Project  3 Agents  4 Cron ●  5 Log
+──────────────────────────────────────────────────────────────────────
+[ tab content area ]
+──────────────────────────────────────────────────────────────────────
+q Quit  1-5 Switch  Tab Focus  ↑↓ Scroll  Enter Select  ? Help  :lang zh/en
 ```
 
-**交互说明：**
+**Header**（常驻）：项目名、当前 sprint、天数进度（Day X/Y）、落后/超前天数。
 
-- `Tab` 在各面板间切换焦点
-- 客户聊天面板：焦点时直接输入，作为甲方向 orchestrator 发送消息
-- Agent Monitor：选中 agent 后按 `Enter` 进入详情（日志、当前任务）
-- Worktree 面板：选中后可快捷执行 merge / cleanup
-- `q` 退出 TUI（orchestrator 后台进程继续运行）
+**标签栏**：
+- `1`–`5` 数字键直接跳转；鼠标可点击 Tab 标题
+- `●` 红点角标：该 Tab 有待人工介入事项
+
+### 3.2 人工介入通知（最高优先级）
+
+**多层通知同时触发：**
+
+| 层级 | 表现 |
+|------|------|
+| TUI 全局 banner | Tab 内容区顶部插入反色高亮行（覆盖所有 Tab，不可绕过） |
+| TUI Tab 角标 | `●` 红点显示在对应 Tab 标题 |
+| TUI 终端 bell | 可配置关闭 |
+| IM 推送 | Slack / 企业微信（按配置） |
+| Email | 按配置收件人 |
+
+**Banner 样式**（红底白字，全宽）：
+```
+████  ⚠ 需要确认：sprint-02 交付物已就绪  Enter确认  r拒绝  e延期  8m后自动通过  ████
+```
+
+**按键**（banner 激活时拦截，优先于当前 Tab 默认按键）：
+- `Enter` — 确认（不触发 chat 发送或卡片展开）
+- `r` — 拒绝并输入备注
+- `e` — 延期（输入延期时长）
+- `i` — 跳转 Cron Tab 查看详情
+- `Esc` — 暂时隐藏 banner（事项未处理，角标保留）
+- `→` — 多条事项时切换到下一条
+
+人工操作完成后：自动撤销 banner + 角标，并通知 IM 平台撤回提醒（平台支持时）。
+
+### 3.3 Tab 1 — Overview（默认视图）
+
+左右分屏：左侧 ~40% 会话，右侧 ~60% 摘要。
+
+**左侧 CLIENT CHAT**：
+- 滚动显示甲方 ↔ orchestrator 对话历史
+- 底部输入框，`Enter` 发送，`Tab` 切换焦点
+
+**右侧全局摘要**（只显示数字，不展开卡片）：
+```
+WORKFLOW                      AGENT PULSE
+✅ Requirements               pm ○  arch ○
+✅ PRD + Design               coder1 ● task-7  coder2 ● task-8
+▶ Development  3/5 done      qa ○  sec ○  ui ○
+○ QA / Delivery
+                              TASKS   3✅  2🟡  8○
+                              ISSUES  1🔴  0🟡  5✅
+                              TIMERS  T1●  T2●  T4●  T5◐
+```
+
+### 3.4 Tab 2 — Project Kanban
+
+三列：`PENDING` / `IN PROGRESS` / `DONE`
+
+导航：`←→` 列间，`↑↓` 卡片间，`Enter` 展开/折叠，鼠标点击选中。
+
+**卡片（折叠态）**：
+```
+┌─ task-00007 ──────────────────┐
+│ 用户注册接口                   │
+│ coder1 · sonnet · tdd-backend  │
+│ mcp: playwright  port: :31007  │
+└────────────────────────────────┘
+```
+
+**卡片（展开态）**：追加显示 acceptance criteria、blockedBy、关联 issue、预计 vs 实际耗时。
+
+**底部时间线**（常驻）：
+```
+sprint-02  2026-05-21 → 2026-06-10  ████████░░░░  60%  剩 20d  落后 8d
+```
+
+### 3.5 Tab 3 — Agent Kanban
+
+每 role 一行（折叠态），`Enter` 展开：
+
+```
+ROLE      INSTANCES   STATUS          CURRENT TASK
+pm        1 / 1       ○ idle          —
+coder     2 / 3       ● 2 working     task-00007, task-00008
+qa        1 / 1       ○ waiting       —
+
+[展开 coder]
+  executor: claude-sonnet-4-6
+  skills: tdd-backend, api-design
+  allowed: Read Write Edit Bash(scope限)
+  forbidden: git push, rm -rf
+  instances: coder1(task-7 · 12m)  coder2(task-8 · 4m)  coder3(idle)
+```
+
+### 3.6 Tab 4 — Cron
+
+上下两区：
+
+**系统定时器**：
+```
+SYSTEM TIMERS        next    interval  status
+● workflow-poll       3s      28s       running
+● heartbeat           1s      3s        running
+● stuck-detect        2s      55s       running
+◐ client-timeout      —       —         paused
+```
+操作：`p` 暂停/恢复，`r` 手动触发。
+
+**业务等待**：
+```
+BUSINESS WAITS           trigger    timeout    on-timeout
+! sprint-02 交付确认 ●   甲方确认   8m left    auto-approve
+○ daily report            23:00      —          send-report
+○ arch review sign-off    arch确认   30min      escalate-pm
+```
+`!` + `●` 触发全局 banner。`Enter` 进入操作流程。
+
+### 3.7 Tab 5 — Log（审计）
+
+**树形导航**（左列选择，右侧显示日志）：
+```
+▼ coder1
+  ● task-00007  2026-05-21T09:12  live
+  ✅ task-00005  2026-05-21T08:30  12m  exit:success
+▶ coder2  ▶ qa  ▶ arch
+```
+
+- `f` — live-tail 选中 session（自动跟随最新行）
+- `Esc` — 退出 tail，返回树形
+- `/` — 搜索日志内容
+- `g` / `G` — 跳到顶部 / 底部；手动滚动时暂停 tail，`G` 恢复跟随
+
+**审计日志存储**：
+- 路径：`.myrmidon/logs/{agent-id}/{session-id}.jsonl`
+- 每条记录：`ts`、`type`（input/output/tool_call/tool_result/error）、内容、`duration_ms`
+- SQLite `agent_sessions` 表做索引（见 6.5）
+- 保留策略：默认 30 天 / 1000 sessions，可配置（`audit.retention`）
+
+### 3.8 交互通用规则
+
+**鼠标支持**：点击 Tab 标题切换、点击卡片展开/折叠、点击 banner 按钮操作、滚轮滚动。键盘导航始终可用，鼠标为增强。
+
+**溢出滚动**：各面板独立维护滚动状态，超出高度时右侧显示 mini scrollbar（`▐`），`↑↓` 或鼠标滚轮滚动。
+
+**i18n**：语言包 `resources/i18n/{zh,en}.json`，键名全英文。`:lang zh/en` 热切换，持久化到 `tui.lang` 配置项，默认跟随 `LANG` 环境变量。
 
 ---
 
@@ -1515,6 +1650,17 @@ CREATE TABLE timer_events (
   detail      TEXT
 );
 
+-- Agent session 审计索引（日志文件见 3.7）
+CREATE TABLE agent_sessions (
+  id          TEXT PRIMARY KEY,          -- '{agent-id}-{timestamp}-{rand}'
+  agent_id    TEXT NOT NULL,             -- 'coder1' | 'qa' | ...
+  task_id     TEXT,                      -- 关联 task，可为空（如 orchestrator 自身 session）
+  start_time  TEXT NOT NULL,
+  end_time    TEXT,
+  exit_status TEXT,                      -- 'success' | 'error' | 'timeout' | 'live'
+  file_path   TEXT NOT NULL              -- .myrmidon/logs/{agent-id}/{id}.jsonl
+);
+
 -- 配置元数据
 CREATE TABLE meta (
   key   TEXT PRIMARY KEY,
@@ -2003,27 +2149,39 @@ export default defineConfig({
     description: 'B2B2C 电商平台',
   },
 
+  // ─── TUI 配置 ────────────────────────────────────────────────────────────
+  tui: {
+    lang: 'zh',                    // 'zh' | 'en'，运行时可 :lang 热切换，默认跟随 LANG 环境变量
+  },
+
+  // ─── 审计日志配置 ─────────────────────────────────────────────────────────
+  audit: {
+    retention: '30d',              // 日志保留时长，或填数字表示最多 session 数（如 1000）
+  },
+
   // 单项目端口公式: basePort + taskId % 1000（→ 31000~31999）
   // monorepo 时由 apps.{name}.basePort 各自独立，此值被忽略
   basePort: 31000,
 
   // ─── 执行器定义 ──────────────────────────────────────────────────────────
   // 声明可用的执行器（runtime + model 组合）。agents 中引用执行器名称。
-  // V1 仅支持 claude-code；V2 起支持 opencode / gemini-cli 等。
+  // runtime 字段可配置为任意已支持的运行时（见下方 Runtime 支持矩阵）。
+  // 如不填 runtime，orchestrator 启动时自动检测（见 Runtime 自动检测规范）。
   executors: {
     'sonnet': {
-      runtime: 'claude-code',
-      model: 'claude-sonnet-4-5',
+      runtime: 'claude-code',        // 显式指定；省略则自动检测
+      model: 'claude-sonnet-4-6',
       maxContextTokens: 200_000,
     },
     'opus': {
       runtime: 'claude-code',
-      model: 'claude-opus-4-5',
+      model: 'claude-opus-4-7',
       maxContextTokens: 200_000,
     },
-    // 未来示例（V2+）:
-    // 'opencode-gpt4o': { runtime: 'opencode', model: 'gpt-4o', maxContextTokens: 128_000 },
-    // 'gemini-pro':     { runtime: 'gemini-cli', model: 'gemini-2.0-pro', maxContextTokens: 1_000_000 },
+    // 多 runtime 混合示例：
+    // 'opencode-gpt4o':  { runtime: 'opencode',    model: 'gpt-4o',            maxContextTokens: 128_000 },
+    // 'gemini-pro':      { runtime: 'gemini-cli',  model: 'gemini-2.0-pro',    maxContextTokens: 1_000_000 },
+    // 'kimi-codex':      { runtime: 'kimi-codex',  model: 'kimi-k2',           maxContextTokens: 128_000 },
   },
 
   // ─── Agent 角色库 ─────────────────────────────────────────────────────────
@@ -3308,6 +3466,204 @@ TIMERS
 
 ---
 
+### 10.7 Runtime 自动检测与安装引导
+
+#### 支持的 Runtime 矩阵
+
+| Runtime ID | 检测命令 | 安装文档 | 支持版本 |
+|-----------|----------|----------|----------|
+| `claude-code` | `claude --version` | https://claude.ai/code | ≥ 1.0 |
+| `opencode` | `opencode --version` | https://opencode.ai | ≥ 0.1 |
+| `gemini-cli` | `gemini --version` | https://github.com/google-gemini/gemini-cli | ≥ 0.1 |
+| `kimi-codex` | `kimi --version` | https://github.com/MoonshotAI/kimi-codex | ≥ 0.1 |
+
+#### 自动检测流程
+
+`myrmidon init` 和 `myrmidon start` 启动时执行 Runtime 检测：
+
+```
+1. 遍历支持的 Runtime 列表，依次执行检测命令
+2. 收集所有可用（exit code = 0）的 runtime
+3. 分支处理：
+   a. 检测到 1 个 → 自动使用，写入 myrmidon.config.ts executors[*].runtime
+   b. 检测到 0 个 → 进入「无 Runtime」引导（见下）
+   c. 检测到 ≥ 2 个 → 进入「多 Runtime」选择交互（见下）
+4. 若 config 已有显式 runtime 配置 → 跳过自动检测，直接校验该 runtime 是否可用
+```
+
+#### 无 Runtime（0 个）引导
+
+```
+✗ 未检测到任何支持的 AI 运行时。
+
+Myrmidon 需要至少一个运行时才能驱动 Agent。请安装以下之一：
+
+  [1] Claude Code    npx @anthropic-ai/claude-code   https://claude.ai/code
+  [2] OpenCode       npm install -g opencode          https://opencode.ai
+  [3] Gemini CLI     npm install -g @google/gemini-cli
+  [4] Kimi Codex     pip install kimi-codex
+
+安装完成后重新运行 myrmidon init（或 myrmidon start）。
+```
+
+进程以非零退出码退出，不继续初始化。
+
+#### 多 Runtime（≥ 2 个）交互选择
+
+```
+✓ 检测到多个可用运行时，请选择默认运行时：
+
+  [1] claude-code   v1.2.3   ← 已安装
+  [2] opencode      v0.3.1   ← 已安装
+  [3] gemini-cli    v0.2.0   ← 已安装
+
+选择 (1-3，或输入 runtime ID): 1
+
+✓ 已选择 claude-code 作为默认 runtime。
+  → 已写入 myrmidon.config.ts executors.sonnet.runtime = 'claude-code'
+
+提示：可在 myrmidon.config.ts 中为不同 executor 指定不同 runtime 实现混合部署。
+```
+
+#### Runtime 不可用时的启动报错
+
+若 `myrmidon start` 时发现 executor 配置的 runtime 不可用：
+
+```
+✗ Executor 'sonnet' 配置的 runtime 'opencode' 未检测到。
+
+  检测命令失败：opencode --version
+  安装方式：npm install -g opencode
+            https://opencode.ai
+
+安装完成后重新运行 myrmidon start。
+若要切换到其他 runtime，运行：
+  myrmidon config set executors.sonnet.runtime claude-code
+```
+
+#### Runtime 检测结果写入 SQLite
+
+```sql
+-- meta 表记录检测结果，供 TUI 状态面板展示
+INSERT OR REPLACE INTO meta VALUES ('runtime.detected', '["claude-code","opencode"]');
+INSERT OR REPLACE INTO meta VALUES ('runtime.selected', 'claude-code');
+INSERT OR REPLACE INTO meta VALUES ('runtime.detected_at', '2026-05-21T09:00:00Z');
+```
+
+---
+
+### 10.8 环境变量与 .env 加载规范
+
+**启动时加载顺序**（后者覆盖前者）：
+1. 系统环境变量
+2. 项目根目录 `.env`（若存在，通过 `dotenv` 加载，不提交 git）
+3. 命令行显式传入的变量（最高优先级）
+
+**必填环境变量**（`myrmidon init` 生成的 `.env.example`）：
+```bash
+# Claude Code / Anthropic API
+ANTHROPIC_API_KEY=           # 必填，执行器调用 claude-code 所需
+
+# 通知渠道（按需填写）
+SLACK_WEBHOOK_URL=
+WECOM_WEBHOOK_URL=
+SMTP_PASS=
+
+# 外部集成（按需填写）
+FIGMA_TOKEN=
+GITHUB_TOKEN=
+LINEAR_API_KEY=
+```
+
+**`.gitignore` 必须包含**：
+```
+.env
+.myrmidon/runtime/
+.myrmidon/logs/
+```
+
+启动时若 `ANTHROPIC_API_KEY` 未设置，orchestrator 立即退出并输出明确错误：
+```
+Error: ANTHROPIC_API_KEY is not set.
+Copy .env.example to .env and fill in the required values.
+```
+
+---
+
+### 10.8 进程生命周期与资源清理
+
+**严格规范：执行器释放前必须清理所有子进程和端口，禁止任何进程/端口泄漏。**
+
+#### 10.8.1 执行器子进程管控
+
+每个 executor（agent session）启动时，orchestrator 注册其 PID 及所有子进程到 SQLite `executor_procs` 表：
+
+```sql
+CREATE TABLE executor_procs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id  TEXT NOT NULL,           -- 对应 agent_sessions.id
+  agent_id    TEXT NOT NULL,
+  task_id     TEXT,
+  pid         INTEGER NOT NULL,
+  port        INTEGER,                 -- 若该进程占用端口（dev server / test server）
+  proc_type   TEXT NOT NULL,           -- 'executor' | 'dev-server' | 'test-server' | 'child'
+  started_at  TEXT NOT NULL,
+  killed_at   TEXT
+);
+```
+
+#### 10.8.2 清理触发时机
+
+以下任一情况发生时，orchestrator **必须**触发该 session 的完整清理流程：
+
+| 触发条件 | 说明 |
+|----------|------|
+| task 正常完成 | agent 报告 exit:success |
+| task 失败/错误 | agent 报告 exit:error 或 exit:timeout |
+| Stuck 检测触发 | 见 10.5 |
+| 手动 `myrmidon agent stop <id>` | 用户主动停止 |
+| SIGTERM / SIGHUP / SIGINT | orchestrator 进程收到信号 |
+
+#### 10.8.3 清理流程（严格顺序，不可跳过）
+
+```
+1. 向 executor 主进程发送 SIGTERM，等待最多 10s
+2. 若 10s 内未退出，发送 SIGKILL
+3. 遍历 executor_procs 表中该 session 的所有子进程：
+   a. 按 proc_type 优先级倒序清理：test-server → dev-server → child → executor
+   b. 每个进程先 SIGTERM（5s），超时则 SIGKILL
+   c. 释放占用的端口（更新 worktrees.port 可用标记）
+4. 更新 executor_procs.killed_at
+5. 更新 agent_sessions.exit_status、end_time
+6. 更新 agents 表 status → 'idle'
+7. 释放 worktree 端口占用（不删除 worktree 目录，由 worktree cleanup 单独处理）
+```
+
+**任何步骤失败**（进程 kill 失败、端口仍被占用）：记录到 `agent_sessions.exit_status = 'cleanup-error'`，写入审计日志，并向 orchestrator 发出告警（TUI banner + IM）。
+
+#### 10.8.4 Worktree 清理规范
+
+Worktree 清理与进程清理**解耦但联动**：
+
+| 阶段 | 动作 |
+|------|------|
+| task 完成后 | 自动触发进程清理（10.8.3），worktree **保留**（等待 merge） |
+| `myrmidon worktree merge <branch>` 成功后 | 自动调用 `worktree cleanup`，删除目录，释放端口记录 |
+| Stuck / 失败任务 | 进程清理后 worktree 保留，标记 `status=failed`，人工决定是否 cleanup |
+| `myrmidon worktree cleanup <branch>` | 先确认进程已清理（若未清理则先执行 10.8.3），再删除目录，更新 SQLite `status=cleaned` |
+
+**Stuck 检测（T4）额外职责**：检查 `executor_procs` 中是否存在已无对应 agent session 的孤儿进程，发现则立即清理并告警。
+
+#### 10.8.5 端口泄漏兜底
+
+orchestrator 启动时（T5 state-consistency 定时器每分钟执行）：
+1. 读取 `worktrees` 表中所有 `status=active` 的端口
+2. 对每个端口执行 `lsof -i :<port>`，检查实际占用进程
+3. 若端口被占用但对应 session 已结束（`agent_sessions.exit_status != 'live'`）：立即 kill 占用进程，记录告警
+4. 若端口未被占用但 worktrees 仍标记为 active：更新 SQLite，释放端口
+
+---
+
 ## 11. 发布路线图
 
 ### V1（当前目标）
@@ -3409,3 +3765,634 @@ TIMERS
 - Plugin 系统（自定义 Agent 类型）
 - 多项目管理（myrmidon workspace）
 - 云端状态同步（团队协作）
+
+---
+
+## 12. 预置 Agent 角色模板库
+
+基于真实软件研发团队分工，提供开箱即用的 Agent 角色预置模板。每个模板包含：角色定位、输入/输出材料规约、MCP 工具、技能包（Skills）、代码/设计规约、`myrmidon.config.ts` 配置片段。
+
+> 使用方式：在 `myrmidon.config.ts` 的 `agentRoles` 中按需引入，覆盖或扩展默认值。
+
+---
+
+### 12.1 产品经理（PM）
+
+**定位**：需求挖掘、用户故事拆解、PRD 撰写、Epic/Sprint 规划、甲方沟通代理。
+
+**适用阶段**：Phase 0（需求收集）→ Phase 2（PRD）→ Phase 5（Sprint 规划）→ 交付确认。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| 甲方原始需求 | orchestrator 转发 | 自然语言 / 语音文字稿 |
+| 竞品分析参考 | 人工提供 | Markdown / URL |
+| 技术可行性反馈 | arch agent | `tech-review.md` |
+| UI 初稿 | uiux agent | Figma URL / 截图 |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| 模块划分 | Markdown | `docs/requirements/modules.md` |
+| PRD | Markdown（版本化） | `docs/prd/prd-v{n}.md` |
+| Epic 列表 | Markdown | `docs/epics/epic-{id}.md` |
+| Sprint 计划 | Markdown | `docs/sprints/sprint-{id}/sprint.md` |
+| 甲方确认记录 | Markdown | `docs/decisions/client-confirm-{date}.md` |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'github',  package: '@github/mcp',   env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } },
+  { name: 'linear',  package: '@linear/mcp',   env: { LINEAR_API_KEY: process.env.LINEAR_API_KEY } },
+  { name: 'figma',   package: '@figma/mcp-server', env: { FIGMA_TOKEN: process.env.FIGMA_TOKEN } },
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `requirements-gathering` | 结构化需求挖掘（5W1H、JTBD 框架） |
+| `prd-writing` | PRD 模板填写规范、验收标准书写 |
+| `epic-sprint-planning` | Epic 拆分原则、Sprint 容量估算 |
+| `user-story-mapping` | 用户旅程地图、优先级排序（MoSCoW） |
+| `client-communication` | 甲方沟通话术、变更管控 |
+
+**Constitution 要点**：
+- 禁止直接修改代码文件（Read-only 访问源码用于理解上下文）
+- 所有 PRD 变更必须版本化（`prd-v2.md` 不覆盖 `prd-v1.md`）
+- 输出语言跟随 `project.lang` 配置
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  pm: {
+    systemPrompt: '.myrmidon/prompts/pm.md',
+    allowedTools: ['Read', 'Write', 'WebFetch', 'WebSearch'],
+    forbiddenTools: ['Bash', 'Edit'],   // 禁止执行命令或修改代码
+    skills: ['requirements-gathering', 'prd-writing', 'epic-sprint-planning'],
+    mcpTools: ['github', 'linear', 'figma'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read docs/prd/ 获取最新 PRD 版本，Read docs/sprints/ 了解当前 Sprint 状态',
+  },
+},
+```
+
+---
+
+### 12.2 UI/UX 设计师（UIUX）
+
+**定位**：高保真设计、设计系统维护、组件规范（DOM Contract）输出、与前端的设计交付。
+
+**适用阶段**：Phase 4（UI 设计）→ Phase 6（组件规范持续维护）。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| PRD + 低保真线框 | pm agent | `prd-v*.md` + Figma URL |
+| 品牌规范 | 人工提供 | Figma Library / `docs/design/brand.md` |
+| 用户反馈 | orchestrator | 自然语言 |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| 高保真设计稿 | Figma（URL 记录在 doc） | `docs/design/ui/figma-links.md` |
+| 设计 Token | JSON / CSS 变量 | `docs/design/tokens/tokens.json` |
+| 组件规范（DOM Contract） | Markdown | `docs/design/ui/components/{name}.md` |
+| 交互说明 | Markdown | `docs/design/ui/interactions.md` |
+| 可访问性检查报告 | Markdown | `docs/design/ui/a11y-report.md` |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'figma', package: '@figma/mcp-server', env: { FIGMA_TOKEN: process.env.FIGMA_TOKEN } },
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `design-system` | 设计 Token 规范、组件库管理 |
+| `dom-contract-writing` | 将设计稿转为机器可读 DOM Contract（供 qa 直接生成 Playwright 测试） |
+| `accessibility-audit` | WCAG 2.1 AA 合规检查清单 |
+| `figma-handoff` | 设计交付标准（标注完整性、切图规范） |
+| `responsive-design` | 断点规范、移动端适配规约 |
+
+**关键规约**：
+- 每个组件 `.md` 必须包含 DOM Contract（必须存在的元素、状态机、Playwright 测试用例列表）
+- 设计 Token 命名：`--color-{category}-{variant}`，如 `--color-primary-500`
+- 交互动效：duration ≤ 300ms，easing 使用 `ease-in-out`，尊重 `prefers-reduced-motion`
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  uiux: {
+    systemPrompt: '.myrmidon/prompts/uiux.md',
+    allowedTools: ['Read', 'Write', 'WebFetch'],
+    forbiddenTools: ['Bash', 'Edit'],
+    skills: ['design-system', 'dom-contract-writing', 'accessibility-audit', 'figma-handoff'],
+    mcpTools: ['figma'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read docs/design/ui/ 了解已完成的组件规范，Read docs/prd/ 获取功能要求',
+  },
+},
+```
+
+---
+
+### 12.3 前端工程师（Frontend）
+
+**定位**：Web 前端实现（React / Vue），基于组件规范和 API 合约开发，测试先行。
+
+**适用阶段**：Phase 6（Sprint 开发）。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| 组件规范 / DOM Contract | uiux agent | `docs/design/ui/components/*.md` |
+| API 合约 | backend agent | `docs/design/architecture/api.md`（OpenAPI） |
+| 设计 Token | uiux agent | `docs/design/tokens/tokens.json` |
+| Task 详情 | orchestrator | `task-{id}.md` |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| 组件源码 | TypeScript/JSX | `apps/frontend/src/components/` |
+| 页面源码 | TypeScript/JSX | `apps/frontend/src/pages/` |
+| 单元/集成测试 | Vitest + RTL | `apps/frontend/src/**/*.test.tsx` |
+| Storybook Story | TypeScript | `apps/frontend/src/**/*.stories.tsx` |
+| 完成报告 | Markdown | `task-{id}.md`（追加） |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'playwright', package: '@playwright/mcp' },
+  { name: 'github',     package: '@github/mcp', env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } },
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `tdd-frontend` | React 组件 TDD：先写 RTL 测试，再实现组件 |
+| `react-conventions` | React/TypeScript 代码规约（见下） |
+| `vue-conventions` | Vue 3 Composition API 规约（按需） |
+| `accessibility-impl` | ARIA 属性、键盘导航、焦点管理实现清单 |
+| `performance-frontend` | Bundle 分析、懒加载、Core Web Vitals 优化 |
+| `css-conventions` | CSS Modules / Tailwind 使用规约 |
+
+**前端代码规约（React/TypeScript）**：
+
+```
+命名：组件 PascalCase，hooks useXxx，工具函数 camelCase，常量 SCREAMING_SNAKE
+文件组织：组件与测试文件同目录，index.ts 仅做导出
+组件规范：
+  - 函数式组件，禁止 class 组件
+  - Props 用 interface 定义，不用 type（便于 extends）
+  - 禁止直接操作 DOM（useRef 例外）
+  - 异步数据：React Query，禁止在 useEffect 内 fetch
+状态管理：
+  - Server state → React Query（@tanstack/query）
+  - Client UI state → Zustand（禁止 Redux，除非项目已有）
+  - 表单 → React Hook Form
+测试：
+  - 每个组件至少有正常渲染、用户交互、loading/error 状态三个用例
+  - 禁止 snapshot 测试（除非 UI 稳定的纯展示组件）
+  - 禁止 mock 内部实现，只 mock 边界（API、路由）
+CSS：
+  - 使用 CSS Modules 或 Tailwind，禁止 inline style（动态值除外）
+  - 设计 Token 通过 CSS 变量引用，不硬编码颜色/间距
+```
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  frontend: {
+    systemPrompt: '.myrmidon/prompts/frontend.md',
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash'],
+    forbiddenTools: ['Bash("rm -rf")', 'Bash("git push")', 'Bash("npm publish")'],
+    skills: ['tdd-frontend', 'react-conventions', 'accessibility-impl', 'performance-frontend'],
+    mcpTools: ['playwright', 'github'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read task-{id}.md 获取当前任务，Read docs/design/ui/components/ 获取组件规范，Read docs/design/architecture/api.md 获取 API 合约',
+  },
+},
+```
+
+---
+
+### 12.4 后端工程师（Backend）
+
+**定位**：API 实现、数据库设计、业务逻辑，测试先行，安全意识嵌入开发流程。
+
+**适用阶段**：Phase 6（Sprint 开发）。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| API 设计文档 | arch agent | `docs/design/architecture/api.md` |
+| 数据库 Schema | arch agent | `docs/design/architecture/db.md` |
+| Task 详情 | orchestrator | `task-{id}.md` |
+| 安全审查结论 | security agent | `docs/security/review-{sprint}.md` |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| API 实现 | 源码 | `apps/backend/src/` |
+| 数据库迁移 | SQL / ORM 迁移文件 | `apps/backend/migrations/` |
+| 单元测试 | 对应语言测试框架 | `apps/backend/src/**/*.test.{ts,py,go}` |
+| 集成测试 | supertest / httpx / net/http/httptest | `apps/backend/tests/integration/` |
+| API 更新记录 | Markdown（版本化） | `docs/design/architecture/api.md`（追加 changelog） |
+| 完成报告 | Markdown | `task-{id}.md`（追加） |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'github', package: '@github/mcp', env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } },
+  // 按数据库类型选一：
+  { name: 'sqlite',     command: 'npx', args: ['@modelcontextprotocol/server-sqlite', '.myrmidon/runtime/myrmidon.db'] },
+  // { name: 'postgres', package: '@modelcontextprotocol/server-postgres', env: { DATABASE_URL: process.env.DATABASE_URL } },
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `tdd-backend` | API 先写测试（supertest/httpx），再实现路由 |
+| `api-design` | OpenAPI 3.1 规范、RESTful 命名、错误码规约 |
+| `sql-design` | 规范化设计、索引策略、迁移安全原则 |
+| `nodejs-conventions` | Node.js/TypeScript 后端规约（见下） |
+| `python-conventions` | Python/FastAPI 规约（按需） |
+| `go-conventions` | Go 规约（按需） |
+| `security-backend` | OWASP Top 10 后端防护清单、输入校验 |
+
+**后端代码规约**：
+
+```
+通用：
+  - 分层架构：Router → Controller（薄）→ Service（业务逻辑）→ Repository（DB）
+  - Service 层不依赖 HTTP 框架（纯函数，可独立测试）
+  - 错误类型化：不 throw 字符串，使用结构化 Error 类
+  - 禁止在代码中硬编码密钥、URL、配置值
+
+Node.js/TypeScript：
+  - 路由参数/Body 用 Zod 校验，校验失败返回 422
+  - 数据库 ORM 优先（Prisma / Drizzle），原生 SQL 仅性能关键路径
+  - 测试：Vitest + supertest，数据库用真实 SQLite（不 mock）
+  - 日志：Pino（JSON 格式），禁止 console.log 进入生产
+
+Python：
+  - 类型注解必须（Pydantic v2 用于数据校验）
+  - FastAPI 路由函数只做参数解析 + 调用 service，禁止业务逻辑进路由
+  - pytest + httpx，fixture 隔离 DB（每 test function 独立事务回滚）
+  - 依赖注入通过 FastAPI Depends
+
+Go：
+  - 错误必须 wrap（fmt.Errorf("context: %w", err)），禁止忽略 error 返回值
+  - 接口驱动设计（Repository、Service 均定义 interface，便于测试替换）
+  - 表驱动测试（Table-driven tests）
+  - 禁止 init() 函数有副作用
+```
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  backend: {
+    systemPrompt: '.myrmidon/prompts/backend.md',
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash'],
+    forbiddenTools: ['Bash("rm -rf")', 'Bash("git push --force")', 'Bash("DROP TABLE")'],
+    skills: ['tdd-backend', 'api-design', 'sql-design', 'nodejs-conventions', 'security-backend'],
+    mcpTools: ['github', 'sqlite'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read task-{id}.md，Read docs/design/architecture/api.md 和 db.md，检查 migrations/ 最新迁移',
+  },
+},
+```
+
+---
+
+### 12.5 移动端工程师（App）
+
+**定位**：iOS / Android / React Native / Flutter 应用实现，适配多平台差异，与后端 API 对接。
+
+**适用阶段**：Phase 6（Sprint 开发）。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| UI 设计 / 组件规范 | uiux agent | Figma URL + `docs/design/ui/components/` |
+| API 合约 | backend agent | `docs/design/architecture/api.md` |
+| 平台规范参考 | 人工提供 | iOS HIG / Material Design URL |
+| Task 详情 | orchestrator | `task-{id}.md` |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| 应用源码 | RN/Flutter/Swift/Kotlin | `apps/mobile/src/` |
+| 组件库 | 对应框架 | `apps/mobile/src/components/` |
+| 单元测试 | Jest / flutter_test / XCTest | `apps/mobile/src/**/*.test.{tsx,dart,swift}` |
+| 深链接配置 | JSON / plist | `apps/mobile/config/deep-links.json` |
+| 完成报告 | Markdown | `task-{id}.md`（追加） |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'github', package: '@github/mcp', env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } },
+  { name: 'playwright', package: '@playwright/mcp' },  // Web 端调试辅助
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `rn-conventions` | React Native 规约（见下） |
+| `flutter-conventions` | Flutter/Dart 规约（见下） |
+| `mobile-accessibility` | iOS VoiceOver / Android TalkBack 适配清单 |
+| `mobile-performance` | 渲染性能、内存管控、冷启动优化 |
+| `deep-link-setup` | Universal Link / App Link 配置规约 |
+| `offline-first` | 本地缓存、离线队列、冲突解决策略 |
+
+**移动端代码规约**：
+
+```
+React Native：
+  - FlatList 替代 ScrollView 渲染长列表（禁止 ScrollView 内嵌大量子项）
+  - 导航：React Navigation v7，屏幕组件不做业务逻辑（仅展示 + 触发 action）
+  - 状态：Zustand（简单）或 Redux Toolkit（复杂），禁止在组件内直接 fetch
+  - 网络：React Query（@tanstack/query-native），统一处理 loading/error
+  - 平台差异：Platform.select()，禁止 Platform.OS === 'ios' 散落业务代码
+  - 图片：统一使用 FastImage，禁止 URI 直接写死
+  - 测试：Jest + RNTL，Native 模块必须 mock
+
+Flutter：
+  - Riverpod（推荐）或 Bloc 做状态管理，禁止裸 setState 用于复杂状态
+  - Widget 树扁平化：抽 const widget，减少重建范围
+  - 异步：使用 AsyncNotifier（Riverpod）或 BlocBuilder，禁止 FutureBuilder 嵌套
+  - 测试：widget test + integration test（flutter_test），golden test 用于关键 UI
+  - 平台适配：adaptive_dialog、Platform.isIOS 封装为 helper，不散落各处
+  - 禁止 .toList() 在 build() 中执行耗时操作
+```
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  'app-mobile': {
+    systemPrompt: '.myrmidon/prompts/app-mobile.md',
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash'],
+    forbiddenTools: ['Bash("rm -rf")', 'Bash("git push --force")'],
+    skills: ['rn-conventions', 'mobile-accessibility', 'mobile-performance', 'offline-first'],
+    mcpTools: ['github', 'playwright'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read task-{id}.md，Read docs/design/ui/components/ 获取组件规范，Read docs/design/architecture/api.md 获取接口文档',
+  },
+},
+```
+
+---
+
+### 12.6 测试工程师（QA）
+
+**定位**：测试用例设计、自动化测试执行、Bug 报告、回归验证，基于 DOM Contract 驱动。
+
+**适用阶段**：Phase 6.3（测试用例预生成）→ Phase 6.4（测试执行）→ Bug 修复后回归。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| DOM Contract | uiux agent | `docs/design/ui/components/*.md` |
+| API 合约 | backend agent | `docs/design/architecture/api.md` |
+| Sprint 任务列表 | orchestrator | `sprint-{id}/sprint.md` |
+| 验收标准 | task 文件 | `task-{id}.md` |
+| 安全审查结论 | security agent | `docs/security/` |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| 测试用例 | Playwright TS / pytest | `tests/e2e/` `tests/api/` |
+| 测试报告 | Markdown + JSON | `docs/qa/report-sprint-{id}.md` |
+| Bug Report | Markdown | `docs/issues/issue-{id}.md` |
+| 回归结果 | Markdown | `docs/qa/regression-{date}.md` |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'playwright', package: '@playwright/mcp' },
+  { name: 'github',     package: '@github/mcp', env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } },
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `webapp-testing` | Playwright E2E 规约、Page Object Model |
+| `api-testing` | REST/GraphQL 接口测试、状态码、Schema 校验 |
+| `mobile-testing` | Detox（RN）/ flutter_driver 移动端自动化 |
+| `performance-testing` | Lighthouse CI、k6 负载测试 |
+| `accessibility-testing` | axe-core 集成、键盘导航验证 |
+| `bug-report-writing` | 标准 Bug 报告格式：复现步骤、期望/实际、截图/日志 |
+| `regression-strategy` | 回归范围界定、冒烟用例选取 |
+
+**QA 规约**：
+
+```
+测试设计原则：
+  - 直接从 DOM Contract 生成 Playwright selector（不依赖 CSS class 或 text，使用 data-testid）
+  - 每个验收标准对应至少一个 Happy Path 用例 + 一个异常用例
+  - API 测试必须覆盖：200 正常、4xx 参数错误、401/403 权限、5xx 服务错误
+
+Playwright 规约：
+  - 使用 Page Object Model，禁止 selector 散落用例代码
+  - 等待用 expect(locator).toBeVisible()，禁止 page.waitForTimeout()
+  - 每个用例独立，禁止用例间共享状态
+  - 截图/视频仅在失败时保留（--reporter html）
+
+Bug 报告必填字段：
+  - 严重级别（Critical / High / Medium / Low）
+  - 复现步骤（最小路径）
+  - 期望行为 vs 实际行为
+  - 环境（浏览器、OS、版本）
+  - 截图或日志片段
+  - 关联 task-id 或 acceptance criteria 编号
+```
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  qa: {
+    systemPrompt: '.myrmidon/prompts/qa.md',
+    allowedTools: ['Read', 'Write', 'Bash'],
+    forbiddenTools: ['Edit', 'Bash("git commit")', 'Bash("git push")'],  // QA 不提交代码
+    skills: ['webapp-testing', 'api-testing', 'performance-testing', 'accessibility-testing', 'bug-report-writing'],
+    mcpTools: ['playwright', 'github'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read docs/design/ui/components/ 获取 DOM Contract，Read docs/design/architecture/api.md，Read sprint-{id}/sprint.md 确认测试范围',
+  },
+},
+```
+
+---
+
+### 12.7 运维工程师（DevOps / SRE）
+
+**定位**：CI/CD 流水线、容器化部署、基础设施即代码、监控告警、生产环境安全加固。
+
+**适用阶段**：Phase 6（并行搭建）→ Phase 7（发布）→ 持续维护。
+
+**输入/输出材料规约**：
+
+| 输入 | 来源 | 格式 |
+|------|------|------|
+| 技术栈说明 | arch agent | `docs/design/architecture/` |
+| 环境要求 | task / PRD | `task-{id}.md` |
+| 安全审查结论 | security agent | `docs/security/` |
+| 性能基线 | qa agent | `docs/qa/report-*.md` |
+
+| 输出 | 格式 | 存放路径 |
+|------|------|----------|
+| CI/CD 流水线 | YAML | `.github/workflows/` |
+| Dockerfile | Dockerfile | `apps/{name}/Dockerfile` |
+| Docker Compose | YAML | `docker-compose.yml` / `docker-compose.prod.yml` |
+| K8s Manifests | YAML | `infra/k8s/` |
+| 监控配置 | YAML / JSON | `infra/monitoring/` |
+| 部署文档 | Markdown | `docs/ops/deploy-{env}.md` |
+| Runbook | Markdown | `docs/ops/runbook-{scenario}.md` |
+
+**MCP 工具**：
+
+```typescript
+mcpTools: [
+  { name: 'github', package: '@github/mcp', env: { GITHUB_TOKEN: process.env.GITHUB_TOKEN } },
+  // 按云平台选用（V2+）:
+  // { name: 'aws',   command: 'uvx', args: ['awslabs.core-mcp-server'] },
+  // { name: 'gcp',   command: 'npx', args: ['@google-cloud/mcp'] },
+]
+```
+
+**技能包**：
+
+| Skill | 说明 |
+|-------|------|
+| `ci-cd-github-actions` | GitHub Actions 流水线规约（见下） |
+| `docker-build` | 多阶段构建、最小化镜像、非 root 用户 |
+| `k8s-deploy` | Manifest 规约、资源限制、健康检查 |
+| `monitoring-setup` | Prometheus + Grafana、告警规则设计 |
+| `security-hardening` | 镜像漏洞扫描、Secret 管理、最小权限原则 |
+| `log-aggregation` | 日志格式标准化、ELK/Loki 接入 |
+| `disaster-recovery` | 备份策略、RTO/RPO 设计、演练清单 |
+
+**DevOps 规约**：
+
+```
+Docker：
+  - 多阶段构建（builder + runtime），runtime 镜像只含运行时依赖
+  - 基础镜像固定版本 tag（禁止 :latest），定期更新并记录变更
+  - 运行用户非 root（USER node:node 或 USER 1001）
+  - .dockerignore 排除 node_modules、.git、.env、测试文件
+  - HEALTHCHECK 指令必须定义
+
+GitHub Actions：
+  - fail-fast: true，第一个失败立即停止
+  - 依赖缓存：actions/cache 缓存 node_modules / pip / go mod
+  - 并行执行：lint、test、build 三个 job 并行
+  - 环境变量通过 GitHub Secrets 注入，禁止明文写入 workflow 文件
+  - PR 检查：必须通过 lint + test + build，方可合并
+  - 生产部署：需要手动 approval（environment: production + required_reviewers）
+
+Kubernetes：
+  - 所有 Deployment 必须设置 resources.requests 和 resources.limits
+  - 禁止使用 :latest 镜像 tag（必须 digest 或精确版本）
+  - 配置 readinessProbe 和 livenessProbe
+  - 敏感配置通过 Kubernetes Secret 挂载，不通过 ConfigMap
+  - 生产命名空间 RBAC 最小权限，禁止 cluster-admin
+
+监控：
+  - 服务必须暴露 /healthz 和 /metrics 端点
+  - 告警规则：P99 延迟 > 500ms、错误率 > 1%、Pod 重启 > 3 次/小时
+  - 日志格式：JSON 结构化，包含 trace_id、service、level、ts、msg 字段
+```
+
+**Config 片段**：
+
+```typescript
+agentRoles: {
+  devops: {
+    systemPrompt: '.myrmidon/prompts/devops.md',
+    allowedTools: ['Read', 'Write', 'Edit', 'Bash'],
+    forbiddenTools: [
+      'Bash("kubectl delete namespace")',
+      'Bash("terraform destroy")',
+      'Bash("rm -rf /"))',
+    ],
+    skills: ['ci-cd-github-actions', 'docker-build', 'k8s-deploy', 'monitoring-setup', 'security-hardening'],
+    mcpTools: ['github'],
+    outputLanguage: 'zh',
+    contextRecoveryInstructions: 'Read docs/design/architecture/ 了解技术栈，Read infra/ 了解现有基础设施配置，Read docs/ops/ 获取已有运维文档',
+  },
+},
+```
+
+---
+
+### 12.8 完整 agentRoles 配置参考
+
+将以上模板整合到 `myrmidon.config.ts` 的 `agentRoles` 块，按实际团队角色选用：
+
+```typescript
+agentRoles: {
+  // ── 产品 / 设计 ─────────────────────────────────────────────
+  pm:         { systemPrompt: '.myrmidon/prompts/pm.md',        skills: ['requirements-gathering', 'prd-writing', 'epic-sprint-planning'],          allowedTools: ['Read','Write','WebFetch'],  forbiddenTools: ['Bash','Edit'],             mcpTools: ['github','linear','figma'] },
+  uiux:       { systemPrompt: '.myrmidon/prompts/uiux.md',      skills: ['design-system', 'dom-contract-writing', 'accessibility-audit'],           allowedTools: ['Read','Write','WebFetch'],  forbiddenTools: ['Bash','Edit'],             mcpTools: ['figma'] },
+
+  // ── 开发 ────────────────────────────────────────────────────
+  frontend:   { systemPrompt: '.myrmidon/prompts/frontend.md',  skills: ['tdd-frontend', 'react-conventions', 'accessibility-impl'],                allowedTools: ['Read','Write','Edit','Bash'], forbiddenTools: ['Bash("git push")'],       mcpTools: ['playwright','github'] },
+  backend:    { systemPrompt: '.myrmidon/prompts/backend.md',   skills: ['tdd-backend', 'api-design', 'sql-design', 'security-backend'],            allowedTools: ['Read','Write','Edit','Bash'], forbiddenTools: ['Bash("git push --force")'], mcpTools: ['github','sqlite'] },
+  'app-mobile': { systemPrompt: '.myrmidon/prompts/app-mobile.md', skills: ['rn-conventions', 'mobile-accessibility', 'offline-first'],            allowedTools: ['Read','Write','Edit','Bash'], forbiddenTools: ['Bash("git push --force")'], mcpTools: ['github','playwright'] },
+
+  // ── 质量 / 运维 ─────────────────────────────────────────────
+  qa:         { systemPrompt: '.myrmidon/prompts/qa.md',        skills: ['webapp-testing', 'api-testing', 'bug-report-writing', 'accessibility-testing'], allowedTools: ['Read','Write','Bash'], forbiddenTools: ['Edit','Bash("git commit")'], mcpTools: ['playwright','github'] },
+  devops:     { systemPrompt: '.myrmidon/prompts/devops.md',    skills: ['ci-cd-github-actions', 'docker-build', 'k8s-deploy', 'monitoring-setup'], allowedTools: ['Read','Write','Edit','Bash'], forbiddenTools: ['Bash("kubectl delete namespace")'], mcpTools: ['github'] },
+
+  // ── 安全（横切，按 Phase 注入） ───────────────────────────────
+  security:   { systemPrompt: '.myrmidon/prompts/security.md',  skills: ['security-owasp', 'dependency-audit', 'secret-scan'],                     allowedTools: ['Read','Bash'],               forbiddenTools: ['Write','Edit'],            mcpTools: ['github'] },
+},
+```
+
+---
+
+### 12.9 通用 Skills 目录
+
+以下 Skill 文件存放于 `.myrmidon/skills/`，可在多个角色间复用：
+
+| Skill 文件 | 适用角色 | 核心内容 |
+|-----------|----------|----------|
+| `requirements-gathering.md` | pm | 5W1H、JTBD 提问框架、需求完整性检查清单 |
+| `prd-writing.md` | pm | PRD 模板、验收标准书写规范（SMART 原则） |
+| `dom-contract-writing.md` | uiux, qa | DOM Contract 格式规范、data-testid 命名规则 |
+| `tdd-frontend.md` | frontend | RTL 测试编写顺序、mock 边界、覆盖率要求 |
+| `tdd-backend.md` | backend | 测试先行步骤、数据库集成测试（不 mock DB） |
+| `react-conventions.md` | frontend | 组件设计、状态管理、性能优化检查项 |
+| `nodejs-conventions.md` | backend | 分层架构、错误处理、日志规范 |
+| `rn-conventions.md` | app-mobile | RN 性能、导航、跨平台适配规约 |
+| `webapp-testing.md` | qa | Playwright POM、等待策略、数据隔离 |
+| `api-testing.md` | qa | 接口覆盖矩阵、Schema 校验、边界条件 |
+| `docker-build.md` | devops | 多阶段构建模板、.dockerignore 标准内容 |
+| `ci-cd-github-actions.md` | devops | Actions 模板（lint+test+build+deploy 四阶段） |
+| `security-owasp.md` | security | OWASP Top 10 检查清单、渗透测试范围定义 |
+| `bug-report-writing.md` | qa | Bug 报告模板、严重性分级标准 |
