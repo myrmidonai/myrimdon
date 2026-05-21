@@ -78,6 +78,7 @@ export const MyrmidonConfigSchema = z.object({
   notifications: z.object({
     channels: z.array(z.object({ type: z.string() }).passthrough()).default([]),
   }).default({ channels: [] }),
+  workflows: z.array(z.string()).optional(),
 });
 
 export type MyrmidonConfig = z.infer<typeof MyrmidonConfigSchema>;

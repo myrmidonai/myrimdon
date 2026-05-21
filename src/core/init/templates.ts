@@ -35,6 +35,8 @@ export default defineConfig({
 
   agentRoles: {},
   agents: {},
+
+  // workflows: ['software-dev-agile'],
 });
 `;
 }

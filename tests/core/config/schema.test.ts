@@ -36,6 +36,26 @@ describe('MyrmidonConfigSchema', () => {
     const result = MyrmidonConfigSchema.safeParse(bad);
     expect(result.success).toBe(false);
   });
+
+  it('accepts a config with a workflows array', () => {
+    const withWorkflows = {
+      ...minimal,
+      workflows: ['software-dev-agile', './workflows/my-flow.ts'],
+    };
+    const result = MyrmidonConfigSchema.safeParse(withWorkflows);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.workflows).toEqual(['software-dev-agile', './workflows/my-flow.ts']);
+    }
+  });
+
+  it('accepts a config without the workflows field', () => {
+    const result = MyrmidonConfigSchema.safeParse(minimal);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.workflows).toBeUndefined();
+    }
+  });
 });
 
 describe('defineConfig', () => {
