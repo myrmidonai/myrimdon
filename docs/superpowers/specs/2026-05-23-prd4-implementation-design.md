@@ -172,8 +172,9 @@ interface Lease {
 ## 5. Database Schema (SCHEMA_VERSION = 3)
 
 Migration from version 2 to 3:
-- **Drop** PRD1-era domain-specific tables: `workflow` (single-row state machine), `tasks`, `worktrees`, `git_ops`, `timer_events`, `agent_sessions`
-- **Keep** `agents`, `meta`, `executor_procs`, `workflows` (from v2)
+- **Drop** PRD1-era domain-specific tables: `workflow` (single-row state machine), `agents`, `tasks`, `worktrees`, `git_ops`, `timer_events`, `agent_sessions`
+  - `agents` is dropped: agent status is now tracked via `executor_procs` + `node_executions`
+- **Keep** `meta`, `executor_procs`, `workflows` (from v2)
 - **Add** event-sourcing tables
 
 ### New tables
@@ -340,8 +341,8 @@ On SIGTERM → wait 10s → SIGKILL. All cleanup logged to `executor_procs.kille
 
 ### 8.1 Loop cadence
 
-- **Event-driven** (dirty-bit): When ArtifactStore.put() is called, mark all downstream artifacts dirty immediately.
-- **Periodic** (T5 = 300s): Full checksum scan via `ArtifactStore.stat()` as backstop.
+- **Event-driven** (dirty-bit): When `StateStore.appendEvent(ARTIFACT_PRODUCED)` fires, the Reconciler immediately marks all downstream artifacts dirty. In v1, agents write files directly to disk; `ARTIFACT_PRODUCED` is the canonical signal, not `ArtifactStore.put()`.
+- **Periodic** (T5 = 300s): Full checksum scan via `ArtifactStore.stat()` as backstop (catches out-of-band file changes the event stream missed).
 
 ### 8.2 Stale propagation
 
@@ -370,6 +371,7 @@ On SIGTERM → wait 10s → SIGKILL. All cleanup logged to `executor_procs.kille
 ```typescript
 retry?: {
   maxAttempts: number;        // default 3
+  notifyAttempt: number;      // default maxAttempts - 1; after this many failures, notify human
   retryIntervalMs: number;    // default 30_000
   onExhausted: 'pause_for_human';  // never 'abort'
 }
@@ -377,11 +379,15 @@ retry?: {
 
 ### 9.2 Escalation path
 
+With defaults (maxAttempts=3, notifyAttempt=2):
+
 ```
-Attempt 1 failure    → auto-retry (increment attempt counter)
-Attempt N failure    → NotificationBus.notify('human_attention_needed', ...)
-Attempt N+M failure  → WorkflowRun status → 'paused', require explicit human resume
+Attempt 1 failure   → auto-retry
+Attempt 2 failure   → auto-retry + NotificationBus.notify('human_attention_needed', ...)
+Attempt 3 failure   → WorkflowRun status → 'paused', require explicit human resume
 ```
+
+Rule: failures < notifyAttempt → silent auto-retry; failures ≥ notifyAttempt AND < maxAttempts → retry + notify; failures = maxAttempts → pause.
 
 ### 9.3 Similarity detection (oscillation guard)
 
@@ -408,7 +414,9 @@ Stored in `node_executions.feedback_json`. On next dispatch, injected as part of
 
 ### 10.1 5-Tab structure
 
-Tabs rendered by Ink, state read directly from SQLite projection tables (`workflow_runs`, `node_executions`, `artifacts`). PRD4 P7 forbids bypassing StateStore for **writes**; read-only SELECT queries on projections are not state mutations and are acceptable for TUI display performance. The TUI never calls `StateStore.appendEvent()`.
+Tabs rendered by Ink with two data paths:
+- **Read path:** Direct SQLite SELECT on projection tables (`workflow_runs`, `node_executions`, `artifacts`). PRD4 P7 forbids bypassing StateStore for writes only; read-only projections are acceptable for display performance.
+- **Write path:** Human approval actions (approve / reject / defer) go through `StateStore.appendEvent()`. No direct db writes from TUI code.
 
 | Tab | Key | Content |
 |-----|-----|---------|
@@ -473,11 +481,13 @@ interface SoftwareDevAgileConfig {
 
 ```
 trigger → requirements(pm) → prd(pm) → design(arch) → sprint-plan(pm)
-→ [parallel_fork] → coding-1..N(coder) → [join]
+→ [parallel_fork] → coding-1, coding-2, coding-3 (coder) → [join]
 → qa(qa) → [condition]
   → passed → human_approval(sprint-delivery)
   → failed → bug-fix(coder) → qa [loop, maxIterations=5]
 ```
+
+Parallel coder slots are statically defined at N=3 maximum. Unused slots (when sprint has fewer tasks) are skipped via a `condition` node at each slot entry that checks `context.coderTasks[n]` exists.
 
 ---
 
