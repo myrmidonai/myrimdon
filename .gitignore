@@ -9,3 +9,5 @@
 !/src/
 !/tests/
 !/.superpowers
+!/docs/
+!/docs/**
