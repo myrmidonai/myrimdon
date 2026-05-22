@@ -1,7 +1,7 @@
-import type Database from 'better-sqlite3';
 import type { NodeDef, NodeType } from './schema.js';
 import type { MyrmidonConfig } from '../config/schema.js';
-import type { RuntimeAdapter } from './runtime-adapter.js';
+import type { StateStore } from '../foundation/state-store.js';
+import type { ArtifactStore } from '../foundation/artifact-store.js';
 import type { NotificationBus } from './notifications.js';
 
 export type NodeStatus =
@@ -10,16 +10,17 @@ export type NodeStatus =
   | 'completed'
   | 'failed'
   | 'skipped'
-  | 'waiting_human';
+  | 'waiting_human'
+  | 'stale_blocked';
 
 export interface NodeContext {
   node: NodeDef;
   workflowId: string;
   runId: string;
   executionId: string;
-  db: Database.Database;
+  stateStore: StateStore;
+  artifactStore: ArtifactStore;
   config: MyrmidonConfig;
-  runtimeAdapter: RuntimeAdapter;
   notificationBus: NotificationBus;
   projectRoot: string;
 }
