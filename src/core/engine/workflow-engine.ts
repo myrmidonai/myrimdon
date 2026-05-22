@@ -98,7 +98,7 @@ export class WorkflowEngine {
       'workflow_runs', { where: { status: 'running' }, orderBy: 'started_at DESC', limit: 1 }
     );
     if (runs.length === 0) return;
-    const run = runs[0];
+    const run = runs[0]!;
     const def = this.workflowDefs.get(run.workflow_id);
     if (!def) return;
     const lease = (await this.scheduler.claim(run.id))!;

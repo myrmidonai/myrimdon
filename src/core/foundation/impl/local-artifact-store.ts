@@ -32,7 +32,7 @@ export class LocalArtifactStore implements ArtifactStore {
   async put(id: string, content: Buffer | Readable): Promise<Checksum> {
     const p = this.resolve(id);
     mkdirSync(dirname(p), { recursive: true });
-    const buf = content instanceof Buffer ? content : await streamToBuffer(content);
+    const buf = Buffer.isBuffer(content) ? content : await streamToBuffer(content);
     writeFileSync(p, buf);
     return createHash('sha256').update(buf).digest('hex');
   }

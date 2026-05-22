@@ -6,7 +6,6 @@ import { makeStartCommand } from './commands/start.js';
 import { makeStopCommand } from './commands/stop.js';
 import { makeStatusCommand } from './commands/status.js';
 import { makeWorkflowCommand } from './commands/workflow.js';
-import { launchTUI } from './tui.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../../package.json') as { version: string };
@@ -25,7 +24,7 @@ program.addCommand(makeWorkflowCommand());
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
-  await launchTUI();
+  program.help();
 } else {
   await program.parseAsync(process.argv);
 }

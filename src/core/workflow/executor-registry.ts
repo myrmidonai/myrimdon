@@ -18,11 +18,15 @@ export interface NodeContext {
   workflowId: string;
   runId: string;
   executionId: string;
-  stateStore: StateStore;
-  artifactStore: ArtifactStore;
+  stateStore?: StateStore;
+  artifactStore?: ArtifactStore;
   config: MyrmidonConfig;
   notificationBus: NotificationBus;
   projectRoot: string;
+  /** @deprecated PRD1 legacy field — used by old engine only */
+  db?: any;
+  /** @deprecated PRD1 legacy field — used by old engine only */
+  runtimeAdapter?: any;
 }
 
 export interface NodeResult {
