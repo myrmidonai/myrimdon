@@ -1,6 +1,8 @@
 # Myrmidon AI Agent Orchestrator — 产品需求文档（PRD）
 
-> 版本：0.1.0-draft｜状态：草稿｜技术栈：Node.js / TypeScript
+> ⚠️ **已归档 — 被 PRD4 取代**。本文档不再作为实施依据；实施请看 `PRD4.md`（v1 基准）+ `PRD5.md`（平台化架构守则）。保留原位仅供 PRD4/PRD5 中"PRD1 §X"引用溯源。
+
+> 版本：0.1.0-draft｜状态：已归档｜技术栈：Node.js / TypeScript
 
 ---
 
