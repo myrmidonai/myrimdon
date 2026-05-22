@@ -69,6 +69,8 @@ export const NodeDefSchema = z.object({
     .object({
       maxAttempts: z.number().int().positive().default(3),
       backoffMs: z.number().int().nonnegative().default(5000),
+      notifyAttempt: z.number().int().positive().optional(),
+      retryIntervalMs: z.number().int().nonnegative().optional(),
     })
     .optional(),
   timeoutMs: z.number().int().positive().optional(),
