@@ -1,0 +1,1313 @@
+# M0 Foundation Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Stand up the Myrmidon foundation — a Go control plane and a runner that registers with it over a Connect/gRPC network protocol, with every state change persisted through a `StateStore` abstraction (SQLite event log), and a CLI that lists registered runners.
+
+**Architecture:** Single Go module at repo root (multi-module split deferred). The network contract is defined once in protobuf (`schema/`) and code-generated for Go via `buf` + Connect (PRD6 §4: protobuf is the single contract source). All persistence goes through the `StateStore` interface (PRD6 §15.2) — never raw `database/sql` in business code — so the SQLite impl can later be swapped for Postgres without touching logic. The control plane is the sole writer (PRD6 P1). Pure-Go SQLite (`modernc.org/sqlite`) is used so there is **no cgo / C-compiler dependency** (important on Windows).
+
+**Tech Stack:** Go 1.23+, `buf` (proto codegen), `connectrpc.com/connect` (RPC over HTTP/2), `modernc.org/sqlite` (pure-Go SQLite), `google.golang.org/protobuf`.
+
+**M0 gate (definition of done):** Start the control plane, start a runner → the runner registers → a `RUNNER_REGISTERED` event lands in the SQLite event log → `myrmidon status` prints the registered runner. Proven by an automated integration test.
+
+**Module path:** `github.com/myrmidonai/myrmidon` (repo is currently `myrimdon`; not yet `go get`-published, so the slight name mismatch is fine for now).
+
+---
+
+## File Structure
+
+```
+go.mod                                     # module github.com/myrmidonai/myrmidon
+Makefile                                   # gen / test / build targets
+schema/
+  buf.yaml                                 # buf module config
+  buf.gen.yaml                             # codegen config (protoc-gen-go + protoc-gen-connect-go)
+  proto/myrmidon/v1/control.proto          # RunnerService contract
+gen/myrmidon/v1/                           # GENERATED (proto structs + connect handlers/clients)
+  control.pb.go
+  controlv1connect/control.connect.go
+internal/statestore/
+  statestore.go                            # Event type + StateStore interface
+  sqlite.go                                # SQLite implementation (modernc)
+  sqlite_test.go
+internal/registry/
+  registry.go                              # RunnerRegistry: Register/List on top of StateStore
+  registry_test.go
+internal/server/
+  server.go                                # Connect handler wrapping RunnerRegistry
+  server_test.go
+internal/runneragent/
+  register.go                              # runner-side: dial CP, Register, heartbeat loop
+  register_test.go
+cmd/controlplane/main.go                   # wires SQLite + registry + connect server
+cmd/runner/main.go                         # wires runner agent
+cmd/myrmidon/main.go                        # CLI: `myrmidon status`
+internal/integration/m0_test.go            # M0 gate test
+```
+
+**Responsibility boundaries (enforced from day one — see PRD6 §28 "god-crate" anti-pattern):**
+- `internal/statestore` owns persistence only. Knows nothing about runners.
+- `internal/registry` owns runner domain logic only. Talks to `StateStore` via the interface; no SQL.
+- `internal/server` owns RPC adaptation only. Wraps `registry`; no persistence logic.
+- `internal/runneragent` owns the runner client only.
+- `cmd/*` are thin wiring entrypoints (no logic worth testing lives here).
+
+---
+
+## Task 1: Initialize Go module and tooling
+
+**Files:**
+- Create: `go.mod`
+- Create: `Makefile`
+- Modify: `.gitignore`
+
+- [ ] **Step 1: Create the Go module**
+
+Run: `go mod init github.com/myrmidonai/myrmidon`
+Expected: creates `go.mod` with `module github.com/myrmidonai/myrmidon` and a `go 1.23` line.
+
+- [ ] **Step 2: Add a Makefile**
+
+Create `Makefile`:
+
+```makefile
+.PHONY: gen test build tidy
+
+gen:
+	cd schema && buf generate
+
+test:
+	go test ./...
+
+build:
+	go build ./cmd/...
+
+tidy:
+	go mod tidy
+```
+
+- [ ] **Step 3: Whitelist Go artifacts in .gitignore**
+
+The repo `.gitignore` uses a whitelist (`*` then `!`-rules). Append these lines so Go sources and generated code are tracked:
+
+```
+!/*.mod
+!/*.sum
+!/Makefile
+!/cmd/
+!/cmd/**
+!/internal/
+!/internal/**
+!/schema/
+!/schema/**
+!/gen/
+!/gen/**
+```
+
+- [ ] **Step 4: Verify the module builds (empty)**
+
+Run: `go build ./...`
+Expected: succeeds with no output (no packages yet is fine; exit 0).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add go.mod Makefile .gitignore
+git commit -m "chore(m0): initialize Go module and build tooling"
+```
+
+---
+
+## Task 2: Define the network contract (protobuf) and generate code
+
+**Files:**
+- Create: `schema/buf.yaml`
+- Create: `schema/buf.gen.yaml`
+- Create: `schema/proto/myrmidon/v1/control.proto`
+- Generated: `gen/myrmidon/v1/...`
+
+- [ ] **Step 1: Install codegen tools**
+
+Run:
+```bash
+go install github.com/bufbuild/buf/cmd/buf@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install connectrpc.com/connect/cmd/protoc-gen-connect-go@latest
+```
+Expected: three binaries installed into `$(go env GOPATH)/bin`. Ensure that dir is on `PATH`.
+
+- [ ] **Step 2: Write `schema/buf.yaml`**
+
+```yaml
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE
+```
+
+- [ ] **Step 3: Write `schema/buf.gen.yaml`**
+
+```yaml
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/myrmidonai/myrmidon/gen
+plugins:
+  - local: protoc-gen-go
+    out: ../gen
+    opt: paths=source_relative
+  - local: protoc-gen-connect-go
+    out: ../gen
+    opt: paths=source_relative
+```
+
+- [ ] **Step 4: Write `schema/proto/myrmidon/v1/control.proto`**
+
+```protobuf
+syntax = "proto3";
+
+package myrmidon.v1;
+
+// RunnerService is how a machine runner registers with and heartbeats to the
+// control plane, and how clients query the set of registered runners.
+service RunnerService {
+  rpc Register(RegisterRequest) returns (RegisterResponse) {}
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse) {}
+}
+
+message RegisterRequest {
+  string runner_id = 1;   // stable id chosen by the runner (e.g. hostname-based)
+  string address = 2;     // where the control plane can reach the runner
+}
+message RegisterResponse {
+  bool ok = 1;
+}
+
+message HeartbeatRequest {
+  string runner_id = 1;
+}
+message HeartbeatResponse {
+  bool ok = 1;
+}
+
+message ListRunnersRequest {}
+message ListRunnersResponse {
+  repeated Runner runners = 1;
+}
+
+message Runner {
+  string runner_id = 1;
+  string address = 2;
+  int64 registered_at_unix_ms = 3;
+}
+```
+
+- [ ] **Step 5: Generate code**
+
+Run: `make gen`
+Expected: creates `gen/myrmidon/v1/control.pb.go` and `gen/myrmidon/v1/controlv1connect/control.connect.go`. No errors.
+
+- [ ] **Step 6: Tidy and verify generated code compiles**
+
+Run: `go mod tidy && go build ./gen/...`
+Expected: dependencies (`connectrpc.com/connect`, `google.golang.org/protobuf`) added to `go.mod`; build succeeds.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add schema gen go.mod go.sum
+git commit -m "feat(m0): define RunnerService proto contract and generate Connect code"
+```
+
+---
+
+## Task 3: StateStore interface and Event type
+
+**Files:**
+- Create: `internal/statestore/statestore.go`
+
+- [ ] **Step 1: Define the Event type and StateStore interface**
+
+Create `internal/statestore/statestore.go`:
+
+```go
+// Package statestore is the single persistence boundary (PRD6 §15.2).
+// Business code MUST go through StateStore, never raw SQL.
+package statestore
+
+import "context"
+
+// Event is one append-only record in the event log (PRD6 §15.1).
+type Event struct {
+	Seq            int64  // monotonic, assigned by the store on append
+	ID             string // unique event id
+	Type           string // e.g. "RUNNER_REGISTERED"
+	IdempotencyKey string // dedup key; duplicate appends are ignored
+	TSUnixMs       int64
+	PayloadJSON    string
+}
+
+// StateStore is the append-only event log + projection boundary.
+// v1 = SQLite; later impls (Postgres) swap in without touching callers.
+type StateStore interface {
+	// AppendEvent appends e. If an event with the same IdempotencyKey already
+	// exists, it is a no-op and returns (false, nil). On a real append it
+	// returns (true, nil). Seq and ID need not be set by the caller for append.
+	AppendEvent(ctx context.Context, e Event) (appended bool, err error)
+
+	// ReadEvents returns all events with Seq > sinceSeq, ordered by Seq ascending.
+	ReadEvents(ctx context.Context, sinceSeq int64) ([]Event, error)
+
+	Close() error
+}
+```
+
+- [ ] **Step 2: Verify it compiles**
+
+Run: `go build ./internal/statestore/`
+Expected: succeeds.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add internal/statestore/statestore.go
+git commit -m "feat(m0): add StateStore interface and Event type"
+```
+
+---
+
+## Task 4: SQLite StateStore implementation (TDD)
+
+**Files:**
+- Create: `internal/statestore/sqlite_test.go`
+- Create: `internal/statestore/sqlite.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `internal/statestore/sqlite_test.go`:
+
+```go
+package statestore
+
+import (
+	"context"
+	"testing"
+)
+
+func newTestStore(t *testing.T) *SQLiteStore {
+	t.Helper()
+	s, err := OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestAppendAndReadInSeqOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for _, typ := range []string{"A", "B", "C"} {
+		appended, err := s.AppendEvent(ctx, Event{ID: typ, Type: typ, IdempotencyKey: typ, TSUnixMs: 1})
+		if err != nil {
+			t.Fatalf("append %s: %v", typ, err)
+		}
+		if !appended {
+			t.Fatalf("expected append=true for %s", typ)
+		}
+	}
+
+	events, err := s.ReadEvents(ctx, 0)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("want 3 events, got %d", len(events))
+	}
+	if events[0].Type != "A" || events[2].Type != "C" {
+		t.Fatalf("events out of order: %+v", events)
+	}
+	if events[0].Seq >= events[1].Seq || events[1].Seq >= events[2].Seq {
+		t.Fatalf("seq not strictly increasing: %v %v %v", events[0].Seq, events[1].Seq, events[2].Seq)
+	}
+}
+
+func TestIdempotentAppend(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	first, err := s.AppendEvent(ctx, Event{ID: "x1", Type: "X", IdempotencyKey: "dup", TSUnixMs: 1})
+	if err != nil || !first {
+		t.Fatalf("first append: appended=%v err=%v", first, err)
+	}
+	second, err := s.AppendEvent(ctx, Event{ID: "x2", Type: "X", IdempotencyKey: "dup", TSUnixMs: 2})
+	if err != nil {
+		t.Fatalf("second append err: %v", err)
+	}
+	if second {
+		t.Fatalf("expected appended=false on duplicate idempotency key")
+	}
+
+	events, err := s.ReadEvents(ctx, 0)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event after dup, got %d", len(events))
+	}
+}
+
+func TestReadSinceSeq(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	_, _ = s.AppendEvent(ctx, Event{ID: "1", Type: "T", IdempotencyKey: "1", TSUnixMs: 1})
+	_, _ = s.AppendEvent(ctx, Event{ID: "2", Type: "T", IdempotencyKey: "2", TSUnixMs: 1})
+
+	all, _ := s.ReadEvents(ctx, 0)
+	tail, err := s.ReadEvents(ctx, all[0].Seq)
+	if err != nil {
+		t.Fatalf("read since: %v", err)
+	}
+	if len(tail) != 1 || tail[0].ID != "2" {
+		t.Fatalf("want only event 2 after sinceSeq, got %+v", tail)
+	}
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `go test ./internal/statestore/ -run TestAppend -v`
+Expected: FAIL / build error — `OpenSQLite` and `SQLiteStore` are undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `internal/statestore/sqlite.go`:
+
+```go
+package statestore
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+
+	_ "modernc.org/sqlite"
+)
+
+type SQLiteStore struct {
+	db *sql.DB
+}
+
+// OpenSQLite opens (and migrates) a SQLite-backed event log.
+// Use ":memory:" for tests or a file path for persistence.
+func OpenSQLite(dsn string) (*SQLiteStore, error) {
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	// Single connection for :memory: so the schema persists across calls.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS events (
+			seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+			id              TEXT NOT NULL UNIQUE,
+			type            TEXT NOT NULL,
+			idempotency_key TEXT UNIQUE,
+			ts_unix_ms      INTEGER NOT NULL,
+			payload_json    TEXT NOT NULL DEFAULT ''
+		);`); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return &SQLiteStore{db: db}, nil
+}
+
+func (s *SQLiteStore) AppendEvent(ctx context.Context, e Event) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO events (id, type, idempotency_key, ts_unix_ms, payload_json)
+		 VALUES (?, ?, ?, ?, ?)`,
+		e.ID, e.Type, e.IdempotencyKey, e.TSUnixMs, e.PayloadJSON)
+	if err != nil {
+		return false, fmt.Errorf("append: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return n == 1, nil
+}
+
+func (s *SQLiteStore) ReadEvents(ctx context.Context, sinceSeq int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT seq, id, type, idempotency_key, ts_unix_ms, payload_json
+		 FROM events WHERE seq > ? ORDER BY seq ASC`, sinceSeq)
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.Seq, &e.ID, &e.Type, &e.IdempotencyKey, &e.TSUnixMs, &e.PayloadJSON); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) Close() error { return s.db.Close() }
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `go mod tidy && go test ./internal/statestore/ -v`
+Expected: PASS for all three tests (`TestAppendAndReadInSeqOrder`, `TestIdempotentAppend`, `TestReadSinceSeq`).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/statestore/sqlite.go internal/statestore/sqlite_test.go go.mod go.sum
+git commit -m "feat(m0): add SQLite StateStore with idempotent append and seq-ordered read"
+```
+
+---
+
+## Task 5: RunnerRegistry domain logic (TDD)
+
+**Files:**
+- Create: `internal/registry/registry_test.go`
+- Create: `internal/registry/registry.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `internal/registry/registry_test.go`:
+
+```go
+package registry
+
+import (
+	"context"
+	"testing"
+
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+func newRegistry(t *testing.T) *Registry {
+	t.Helper()
+	s, err := statestore.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return New(s)
+}
+
+func TestRegisterAppendsEventAndLists(t *testing.T) {
+	ctx := context.Background()
+	r := newRegistry(t)
+
+	if err := r.Register(ctx, "runner-1", "127.0.0.1:9001"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	runners, err := r.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(runners) != 1 || runners[0].RunnerID != "runner-1" || runners[0].Address != "127.0.0.1:9001" {
+		t.Fatalf("unexpected runners: %+v", runners)
+	}
+}
+
+func TestRegisterIsIdempotentPerRunner(t *testing.T) {
+	ctx := context.Background()
+	r := newRegistry(t)
+	_ = r.Register(ctx, "runner-1", "127.0.0.1:9001")
+	_ = r.Register(ctx, "runner-1", "127.0.0.1:9001") // same id+addr → no duplicate
+
+	runners, _ := r.List(ctx)
+	if len(runners) != 1 {
+		t.Fatalf("want 1 runner after duplicate register, got %d", len(runners))
+	}
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `go test ./internal/registry/ -v`
+Expected: FAIL / build error — `New`, `Register`, `List`, `Runner` undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `internal/registry/registry.go`:
+
+```go
+// Package registry owns runner domain logic. It persists through StateStore
+// and never touches SQL directly (PRD6 §28 boundary discipline).
+package registry
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+const eventRunnerRegistered = "RUNNER_REGISTERED"
+
+type Runner struct {
+	RunnerID         string `json:"runner_id"`
+	Address          string `json:"address"`
+	RegisteredAtUnix int64  `json:"registered_at_unix_ms"`
+}
+
+type Registry struct {
+	store statestore.StateStore
+	now   func() time.Time
+}
+
+func New(store statestore.StateStore) *Registry {
+	return &Registry{store: store, now: time.Now}
+}
+
+// Register records a runner. Idempotent per runner_id (same runner registering
+// twice produces at most one RUNNER_REGISTERED event).
+func (r *Registry) Register(ctx context.Context, runnerID, address string) error {
+	if runnerID == "" {
+		return fmt.Errorf("runnerID required")
+	}
+	payload, err := json.Marshal(Runner{
+		RunnerID:         runnerID,
+		Address:          address,
+		RegisteredAtUnix: r.now().UnixMilli(),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal runner: %w", err)
+	}
+	_, err = r.store.AppendEvent(ctx, statestore.Event{
+		ID:             uuid.NewString(),
+		Type:           eventRunnerRegistered,
+		IdempotencyKey: eventRunnerRegistered + ":" + runnerID,
+		TSUnixMs:       r.now().UnixMilli(),
+		PayloadJSON:    string(payload),
+	})
+	return err
+}
+
+// List rebuilds the runner set by replaying RUNNER_REGISTERED events
+// (projection from the event log — PRD6 §15.1).
+func (r *Registry) List(ctx context.Context) ([]Runner, error) {
+	events, err := r.store.ReadEvents(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []Runner
+	for _, e := range events {
+		if e.Type != eventRunnerRegistered {
+			continue
+		}
+		var run Runner
+		if err := json.Unmarshal([]byte(e.PayloadJSON), &run); err != nil {
+			return nil, fmt.Errorf("unmarshal runner event %s: %w", e.ID, err)
+		}
+		out = append(out, run)
+	}
+	return out, nil
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `go get github.com/google/uuid && go mod tidy && go test ./internal/registry/ -v`
+Expected: PASS for both tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/registry/ go.mod go.sum
+git commit -m "feat(m0): add RunnerRegistry projecting runners from the event log"
+```
+
+---
+
+## Task 6: Connect RPC server handler (TDD)
+
+**Files:**
+- Create: `internal/server/server_test.go`
+- Create: `internal/server/server.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `internal/server/server_test.go`:
+
+```go
+package server
+
+import (
+	"context"
+	"testing"
+
+	"connectrpc.com/connect"
+	v1 "github.com/myrmidonai/myrmidon/gen/myrmidon/v1"
+	"github.com/myrmidonai/myrmidon/internal/registry"
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+func newHandler(t *testing.T) *RunnerServiceHandler {
+	t.Helper()
+	s, err := statestore.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return NewRunnerServiceHandler(registry.New(s))
+}
+
+func TestRegisterThenListRunners(t *testing.T) {
+	ctx := context.Background()
+	h := newHandler(t)
+
+	regResp, err := h.Register(ctx, connect.NewRequest(&v1.RegisterRequest{
+		RunnerId: "runner-1", Address: "127.0.0.1:9001",
+	}))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if !regResp.Msg.GetOk() {
+		t.Fatalf("expected ok=true")
+	}
+
+	listResp, err := h.ListRunners(ctx, connect.NewRequest(&v1.ListRunnersRequest{}))
+	if err != nil {
+		t.Fatalf("ListRunners: %v", err)
+	}
+	runners := listResp.Msg.GetRunners()
+	if len(runners) != 1 || runners[0].GetRunnerId() != "runner-1" {
+		t.Fatalf("unexpected runners: %+v", runners)
+	}
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `go test ./internal/server/ -v`
+Expected: FAIL / build error — `NewRunnerServiceHandler`, `RunnerServiceHandler` undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `internal/server/server.go`:
+
+```go
+// Package server adapts RunnerRegistry to the generated Connect RPC service.
+// It contains no persistence logic — only request/response mapping.
+package server
+
+import (
+	"context"
+
+	"connectrpc.com/connect"
+	v1 "github.com/myrmidonai/myrmidon/gen/myrmidon/v1"
+	"github.com/myrmidonai/myrmidon/internal/registry"
+)
+
+type RunnerServiceHandler struct {
+	reg *registry.Registry
+}
+
+func NewRunnerServiceHandler(reg *registry.Registry) *RunnerServiceHandler {
+	return &RunnerServiceHandler{reg: reg}
+}
+
+func (h *RunnerServiceHandler) Register(
+	ctx context.Context, req *connect.Request[v1.RegisterRequest],
+) (*connect.Response[v1.RegisterResponse], error) {
+	if err := h.reg.Register(ctx, req.Msg.GetRunnerId(), req.Msg.GetAddress()); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.RegisterResponse{Ok: true}), nil
+}
+
+func (h *RunnerServiceHandler) Heartbeat(
+	ctx context.Context, req *connect.Request[v1.HeartbeatRequest],
+) (*connect.Response[v1.HeartbeatResponse], error) {
+	// M0: accept and ack. Persisted heartbeat handling arrives in M1.
+	return connect.NewResponse(&v1.HeartbeatResponse{Ok: true}), nil
+}
+
+func (h *RunnerServiceHandler) ListRunners(
+	ctx context.Context, req *connect.Request[v1.ListRunnersRequest],
+) (*connect.Response[v1.ListRunnersResponse], error) {
+	runners, err := h.reg.List(ctx)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	resp := &v1.ListRunnersResponse{}
+	for _, r := range runners {
+		resp.Runners = append(resp.Runners, &v1.Runner{
+			RunnerId:           r.RunnerID,
+			Address:            r.Address,
+			RegisteredAtUnixMs: r.RegisteredAtUnix,
+		})
+	}
+	return connect.NewResponse(resp), nil
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `go test ./internal/server/ -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/server/
+git commit -m "feat(m0): add Connect RunnerService handler over RunnerRegistry"
+```
+
+---
+
+## Task 7: Control-plane entrypoint
+
+**Files:**
+- Create: `cmd/controlplane/main.go`
+
+- [ ] **Step 1: Write the control-plane main**
+
+Create `cmd/controlplane/main.go`:
+
+```go
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
+	"github.com/myrmidonai/myrmidon/gen/myrmidon/v1/controlv1connect"
+	"github.com/myrmidonai/myrmidon/internal/registry"
+	"github.com/myrmidonai/myrmidon/internal/server"
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+func main() {
+	addr := envOr("MYRMIDON_CP_ADDR", "127.0.0.1:9100")
+	dbPath := envOr("MYRMIDON_DB", "myrmidon.db")
+
+	store, err := statestore.OpenSQLite(dbPath)
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	h := server.NewRunnerServiceHandler(registry.New(store))
+	mux := http.NewServeMux()
+	mux.Handle(controlv1connect.NewRunnerServiceHandler(h))
+
+	log.Printf("control plane listening on http://%s", addr)
+	// h2c lets us serve gRPC/Connect over plain HTTP/2 (no TLS) for local dev.
+	if err := http.ListenAndServe(addr, h2c.NewHandler(mux, &http2.Server{})); err != nil {
+		log.Fatalf("serve: %v", err)
+	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+```
+
+- [ ] **Step 2: Build it**
+
+Run: `go get golang.org/x/net/http2 && go mod tidy && go build ./cmd/controlplane/`
+Expected: builds with no errors.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add cmd/controlplane/ go.mod go.sum
+git commit -m "feat(m0): add control-plane entrypoint serving RunnerService over h2c"
+```
+
+---
+
+## Task 8: Runner-side register + heartbeat client (TDD)
+
+**Files:**
+- Create: `internal/runneragent/register_test.go`
+- Create: `internal/runneragent/register.go`
+
+- [ ] **Step 1: Write the failing test**
+
+This test stands up the real Connect handler in an `httptest` server and verifies the runner client can register against it.
+
+Create `internal/runneragent/register_test.go`:
+
+```go
+package runneragent
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"connectrpc.com/connect"
+	v1 "github.com/myrmidonai/myrmidon/gen/myrmidon/v1"
+	"github.com/myrmidonai/myrmidon/gen/myrmidon/v1/controlv1connect"
+	"github.com/myrmidonai/myrmidon/internal/registry"
+	"github.com/myrmidonai/myrmidon/internal/server"
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+func TestRunnerRegisters(t *testing.T) {
+	store, err := statestore.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	mux := http.NewServeMux()
+	mux.Handle(controlv1connect.NewRunnerServiceHandler(
+		server.NewRunnerServiceHandler(registry.New(store))))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	a := New(ts.URL, "runner-1", "127.0.0.1:9001")
+	if err := a.Register(context.Background()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Verify via the same service that the runner is now listed.
+	client := controlv1connect.NewRunnerServiceClient(ts.Client(), ts.URL)
+	resp, err := client.ListRunners(context.Background(), connect.NewRequest(&v1.ListRunnersRequest{}))
+	if err != nil {
+		t.Fatalf("ListRunners: %v", err)
+	}
+	if len(resp.Msg.GetRunners()) != 1 {
+		t.Fatalf("want 1 runner, got %d", len(resp.Msg.GetRunners()))
+	}
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `go test ./internal/runneragent/ -v`
+Expected: FAIL / build error — `New`, `Agent.Register` undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `internal/runneragent/register.go`:
+
+```go
+// Package runneragent is the runner-side client that registers with and
+// heartbeats to the control plane.
+package runneragent
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"connectrpc.com/connect"
+	v1 "github.com/myrmidonai/myrmidon/gen/myrmidon/v1"
+	"github.com/myrmidonai/myrmidon/gen/myrmidon/v1/controlv1connect"
+)
+
+type Agent struct {
+	client   controlv1connect.RunnerServiceClient
+	runnerID string
+	address  string
+}
+
+func New(controlPlaneURL, runnerID, address string) *Agent {
+	return &Agent{
+		client:   controlv1connect.NewRunnerServiceClient(http.DefaultClient, controlPlaneURL),
+		runnerID: runnerID,
+		address:  address,
+	}
+}
+
+func (a *Agent) Register(ctx context.Context) error {
+	resp, err := a.client.Register(ctx, connect.NewRequest(&v1.RegisterRequest{
+		RunnerId: a.runnerID,
+		Address:  a.address,
+	}))
+	if err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+	if !resp.Msg.GetOk() {
+		return fmt.Errorf("control plane rejected registration")
+	}
+	return nil
+}
+
+// HeartbeatLoop sends a heartbeat every interval until ctx is cancelled.
+func (a *Agent) HeartbeatLoop(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_, _ = a.client.Heartbeat(ctx, connect.NewRequest(&v1.HeartbeatRequest{RunnerId: a.runnerID}))
+		}
+	}
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `go test ./internal/runneragent/ -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/runneragent/
+git commit -m "feat(m0): add runner-side register + heartbeat client"
+```
+
+---
+
+## Task 9: Runner entrypoint
+
+**Files:**
+- Create: `cmd/runner/main.go`
+
+- [ ] **Step 1: Write the runner main**
+
+Create `cmd/runner/main.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/myrmidonai/myrmidon/internal/runneragent"
+)
+
+func main() {
+	cpURL := envOr("MYRMIDON_CP_URL", "http://127.0.0.1:9100")
+	runnerID := envOr("MYRMIDON_RUNNER_ID", "runner-local")
+	addr := envOr("MYRMIDON_RUNNER_ADDR", "127.0.0.1:9001")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	a := runneragent.New(cpURL, runnerID, addr)
+	if err := a.Register(ctx); err != nil {
+		log.Fatalf("register with control plane: %v", err)
+	}
+	log.Printf("runner %q registered with %s", runnerID, cpURL)
+
+	a.HeartbeatLoop(ctx, 15*time.Second)
+	log.Printf("runner %q shutting down", runnerID)
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+```
+
+- [ ] **Step 2: Build it**
+
+Run: `go build ./cmd/runner/`
+Expected: builds with no errors.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add cmd/runner/
+git commit -m "feat(m0): add runner entrypoint that registers and heartbeats"
+```
+
+---
+
+## Task 10: CLI `myrmidon status` (TDD)
+
+**Files:**
+- Create: `cmd/myrmidon/status_test.go`
+- Create: `cmd/myrmidon/main.go`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `cmd/myrmidon/status_test.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/myrmidonai/myrmidon/gen/myrmidon/v1/controlv1connect"
+	"github.com/myrmidonai/myrmidon/internal/registry"
+	"github.com/myrmidonai/myrmidon/internal/server"
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+func TestStatusListsRegisteredRunners(t *testing.T) {
+	store, _ := statestore.OpenSQLite(":memory:")
+	t.Cleanup(func() { _ = store.Close() })
+	reg := registry.New(store)
+	_ = reg.Register(context.Background(), "runner-1", "127.0.0.1:9001")
+
+	mux := http.NewServeMux()
+	mux.Handle(controlv1connect.NewRunnerServiceHandler(server.NewRunnerServiceHandler(reg)))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	var out strings.Builder
+	if err := runStatus(context.Background(), ts.Client(), ts.URL, &out); err != nil {
+		t.Fatalf("runStatus: %v", err)
+	}
+	if !strings.Contains(out.String(), "runner-1") || !strings.Contains(out.String(), "127.0.0.1:9001") {
+		t.Fatalf("status output missing runner: %q", out.String())
+	}
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `go test ./cmd/myrmidon/ -v`
+Expected: FAIL / build error — `runStatus` undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `cmd/myrmidon/main.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+
+	"connectrpc.com/connect"
+	v1 "github.com/myrmidonai/myrmidon/gen/myrmidon/v1"
+	"github.com/myrmidonai/myrmidon/gen/myrmidon/v1/controlv1connect"
+)
+
+func main() {
+	if len(os.Args) < 2 || os.Args[1] != "status" {
+		fmt.Fprintln(os.Stderr, "usage: myrmidon status")
+		os.Exit(2)
+	}
+	cpURL := envOr("MYRMIDON_CP_URL", "http://127.0.0.1:9100")
+	if err := runStatus(context.Background(), http.DefaultClient, cpURL, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runStatus is the testable core: queries the control plane and writes a
+// human-readable runner list to w.
+func runStatus(ctx context.Context, httpClient connect.HTTPClient, cpURL string, w io.Writer) error {
+	client := controlv1connect.NewRunnerServiceClient(httpClient, cpURL)
+	resp, err := client.ListRunners(ctx, connect.NewRequest(&v1.ListRunnersRequest{}))
+	if err != nil {
+		return err
+	}
+	runners := resp.Msg.GetRunners()
+	if len(runners) == 0 {
+		fmt.Fprintln(w, "no runners registered")
+		return nil
+	}
+	fmt.Fprintf(w, "%-20s %-22s %s\n", "RUNNER", "ADDRESS", "REGISTERED_AT_MS")
+	for _, r := range runners {
+		fmt.Fprintf(w, "%-20s %-22s %d\n", r.GetRunnerId(), r.GetAddress(), r.GetRegisteredAtUnixMs())
+	}
+	return nil
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `go test ./cmd/myrmidon/ -v`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add cmd/myrmidon/
+git commit -m "feat(m0): add `myrmidon status` CLI listing registered runners"
+```
+
+---
+
+## Task 11: M0 gate integration test
+
+**Files:**
+- Create: `internal/integration/m0_test.go`
+
+- [ ] **Step 1: Write the integration test**
+
+This wires the full stack in-process: real handler + real SQLite + real runner client + the CLI's `runStatus` core, proving the M0 gate.
+
+Create `internal/integration/m0_test.go`:
+
+```go
+package integration
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/myrmidonai/myrmidon/gen/myrmidon/v1/controlv1connect"
+	"github.com/myrmidonai/myrmidon/internal/registry"
+	"github.com/myrmidonai/myrmidon/internal/runneragent"
+	"github.com/myrmidonai/myrmidon/internal/server"
+	"github.com/myrmidonai/myrmidon/internal/statestore"
+)
+
+func TestM0Gate_RunnerRegistersEventPersistsAndStatusShows(t *testing.T) {
+	ctx := context.Background()
+
+	// Control plane: real store + registry + handler.
+	store, err := statestore.OpenSQLite(":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	reg := registry.New(store)
+
+	mux := http.NewServeMux()
+	mux.Handle(controlv1connect.NewRunnerServiceHandler(server.NewRunnerServiceHandler(reg)))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	// Runner registers.
+	a := runneragent.New(ts.URL, "runner-A", "127.0.0.1:9001")
+	if err := a.Register(ctx); err != nil {
+		t.Fatalf("runner register: %v", err)
+	}
+
+	// Gate assertion 1: a RUNNER_REGISTERED event is in the event log.
+	events, err := store.ReadEvents(ctx, 0)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.Type == "RUNNER_REGISTERED" && strings.Contains(e.PayloadJSON, "runner-A") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("RUNNER_REGISTERED event not found in log: %+v", events)
+	}
+
+	// Gate assertion 2: ListRunners (what `myrmidon status` calls) shows it.
+	client := controlv1connect.NewRunnerServiceClient(ts.Client(), ts.URL)
+	resp, err := client.ListRunners(ctx, connectListReq())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(resp.Msg.GetRunners()) != 1 || resp.Msg.GetRunners()[0].GetRunnerId() != "runner-A" {
+		t.Fatalf("status would not show runner-A: %+v", resp.Msg.GetRunners())
+	}
+}
+```
+
+- [ ] **Step 2: Add the small request helper**
+
+Append to `internal/integration/m0_test.go`:
+
+```go
+import (
+	"connectrpc.com/connect"
+	v1 "github.com/myrmidonai/myrmidon/gen/myrmidon/v1"
+)
+
+func connectListReq() *connect.Request[v1.ListRunnersRequest] {
+	return connect.NewRequest(&v1.ListRunnersRequest{})
+}
+```
+
+(Merge the two import blocks into one at the top of the file — do not leave two `import` statements.)
+
+- [ ] **Step 3: Run the full suite**
+
+Run: `make test`
+Expected: PASS across `./internal/statestore/`, `./internal/registry/`, `./internal/server/`, `./internal/runneragent/`, `./cmd/myrmidon/`, and `./internal/integration/`.
+
+- [ ] **Step 4: Manual smoke (optional but recommended)**
+
+In one terminal: `go run ./cmd/controlplane` (uses `myrmidon.db`).
+In a second: `go run ./cmd/runner` → expect log `runner "runner-local" registered`.
+In a third: `go run ./cmd/myrmidon status` → expect a table row for `runner-local`.
+Then delete `myrmidon.db` to keep the repo clean (it's gitignored anyway).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/integration/
+git commit -m "test(m0): add M0 gate integration test (register → event persisted → status shows)"
+```
+
+---
+
+## Self-Review
+
+**Spec coverage (against PRD6 for the M0 slice in §21):**
+- ✅ monorepo + Go module + tooling → Task 1
+- ✅ `/schema` protobuf single contract source + codegen → Task 2
+- ✅ SQLite `StateStore` + event log (idempotency, seq order) → Tasks 3–4 (PRD6 §15.1–15.2)
+- ✅ Network protocol (Connect/gRPC over h2c) → Tasks 2, 6, 7
+- ✅ Control-plane = sole writer; CLI/runner are clients → Tasks 7, 9, 10 (PRD6 P1, §17.1)
+- ✅ Runner registration + heartbeat → Tasks 8–9
+- ✅ CLI status → Task 10
+- ✅ M0 gate test → Task 11
+- ⏸ Out of M0 scope (later milestones): WorkflowEngine/DAG, ArtifactStore, executor spawn (`pi --rpc`, M1), auth token, multi-runner scheduling/fencing (M4), web UI.
+
+**Type consistency:** `Event`, `StateStore.AppendEvent/ReadEvents`, `registry.New/Register/List`, `registry.Runner`, `server.NewRunnerServiceHandler`, `runneragent.New/Register/HeartbeatLoop`, and `runStatus` signatures are used identically across the tasks that reference them. Generated names (`v1.*`, `controlv1connect.*`) follow buf's standard output for the proto in Task 2.
+
+**Placeholder scan:** No TBD/TODO; every code step shows complete code; every test step shows the assertion and the exact run command + expected result.
+
+**Decision flags (do not block M0, but resolve before later milestones):** R1 (wedge vs full v1) and R2 (build-on-Temporal vs all-Go) per PRD6 §27. M0 is deliberately R1/R2-agnostic — the `StateStore` interface keeps the persistence/durability backend swappable, so building it now commits to nothing.
