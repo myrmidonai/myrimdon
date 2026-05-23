@@ -148,12 +148,13 @@ export class WorkflowEngine {
         workflowId: this.currentDef!.id,
         runId,
         executionId: exec.id,
-        db: this.db,
+        stateStore: this.db as any,
+        artifactStore: this.db as any,
+        backend: this.runtimeAdapter as any,
         config: this.config,
-        runtimeAdapter: this.runtimeAdapter,
         notificationBus: this.notificationBus,
         projectRoot: this.projectRoot,
-      });
+      } as any);
     } catch (err) {
       result = { status: 'failed', error: String(err) };
     }

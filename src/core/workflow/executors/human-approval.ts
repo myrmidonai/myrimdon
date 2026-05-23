@@ -10,27 +10,22 @@ export class HumanApprovalExecutor implements NodeExecutor {
     }
 
     const now = new Date().toISOString();
-    const confirmation = JSON.stringify({
-      nodeId: ctx.node.id,
-      message: approval.message,
-      runId: ctx.runId,
-      allowedActions: approval.allowedActions,
-      onTimeout: approval.onTimeout,
-      timeoutMs: approval.timeoutMs ?? 600_000,
-      requestedAt: now,
+
+    // Emit waiting_human event
+    await ctx.stateStore.appendEvent({
+      run_id: ctx.runId,
+      type: 'WAITING_HUMAN',
+      payload_json: JSON.stringify({
+        nodeId: ctx.node.id,
+        message: approval.message,
+        allowedActions: approval.allowedActions,
+        onTimeout: approval.onTimeout,
+        timeoutMs: approval.timeoutMs ?? 600_000,
+        requestedAt: now,
+      }),
+      idempotency_key: `${ctx.executionId}:waiting_human`,
+      created_at: now,
     });
-
-    ctx.db
-      .prepare(
-        'UPDATE workflow SET pending_confirmation = ?, confirmation_requested_at = ? WHERE id = 1',
-      )
-      .run(confirmation, now);
-
-    ctx.db
-      .prepare(
-        "UPDATE node_executions SET status = 'waiting_human', started_at = ? WHERE id = ?",
-      )
-      .run(now, ctx.executionId);
 
     await ctx.notificationBus.notify('human_intervention', {
       nodeId: ctx.node.id,

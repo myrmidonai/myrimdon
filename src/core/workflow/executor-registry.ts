@@ -2,6 +2,7 @@ import type { NodeDef, NodeType } from './schema.js';
 import type { MyrmidonConfig } from '../config/schema.js';
 import type { StateStore } from '../foundation/state-store.js';
 import type { ArtifactStore } from '../foundation/artifact-store.js';
+import type { ExecutionBackend } from '../foundation/execution-backend.js';
 import type { NotificationBus } from './notifications.js';
 
 export type NodeStatus =
@@ -18,15 +19,12 @@ export interface NodeContext {
   workflowId: string;
   runId: string;
   executionId: string;
-  stateStore?: StateStore;
-  artifactStore?: ArtifactStore;
+  stateStore: StateStore;
+  artifactStore: ArtifactStore;
+  backend: ExecutionBackend;
   config: MyrmidonConfig;
   notificationBus: NotificationBus;
   projectRoot: string;
-  /** @deprecated PRD1 legacy field — used by old engine only */
-  db?: any;
-  /** @deprecated PRD1 legacy field — used by old engine only */
-  runtimeAdapter?: any;
 }
 
 export interface NodeResult {

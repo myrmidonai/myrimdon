@@ -1,38 +1,49 @@
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 import type { NodeExecutor, NodeContext, NodeResult } from '../executor-registry.js';
-import { buildDispatchPrompt, writeDispatchPrompt } from '../dispatcher.js';
+import { buildDispatchContent } from '../../engine/dispatch-builder.js';
+import { createWorktree } from '../../foundation/impl/local-execution-backend.js';
 
 export class AgentExecutor implements NodeExecutor {
   readonly type = 'agent' as const;
 
   async execute(ctx: NodeContext): Promise<NodeResult> {
-    const { node, workflowId, runId, db, config, runtimeAdapter, projectRoot } = ctx;
+    const { node, workflowId, runId, executionId, stateStore, artifactStore, backend, projectRoot } = ctx;
 
-    const executorKey = node.executor ?? 'sonnet';
-    const executorConfig = config.executors[executorKey];
-    if (!executorConfig) {
-      return { status: 'failed', error: `Executor '${executorKey}' not found in config` };
-    }
+    // Build DISPATCH.md content
+    const dispatchContent = await buildDispatchContent({
+      workflowName: workflowId,
+      node,
+      runId,
+      projectRoot,
+      artifactStore,
+    });
 
-    const prompt = buildDispatchPrompt({ node, workflowId, runId, db, config, projectRoot });
-    const promptFile = writeDispatchPrompt({ prompt, projectRoot });
+    // Create worktree for this node
+    const worktreePath = createWorktree(projectRoot, runId, node.id);
 
-    let spawnedProc: { pid: number; kill: (s: 'SIGTERM' | 'SIGKILL') => void };
+    // Write DISPATCH.md to worktree
+    const dispatchFilePath = resolve(worktreePath, 'DISPATCH.md');
+    mkdirSync(dirname(dispatchFilePath), { recursive: true });
+    writeFileSync(dispatchFilePath, dispatchContent, 'utf8');
+
+    // Spawn agent via backend
     try {
-      spawnedProc = await runtimeAdapter.spawn({
-        promptFile,
-        cwd: projectRoot,
-        dbPath: prompt.dbPath,
-        env: {},
+      const handle = await backend.spawn({
+        execId: executionId,
+        worktreePath,
+        dispatchFilePath,
       });
+
+      // Record process in DB for drift detection
+      const now = new Date().toISOString();
+      (stateStore as any).db?.prepare(
+        'INSERT INTO executor_procs (session_id, agent_id, task_id, pid, proc_type, started_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ).run(executionId, node.id, node.id, handle.pid, 'agent', now);
+
+      return { status: 'running', outputJson: { handle, worktreePath, dispatchFilePath } };
     } catch (err) {
       return { status: 'failed', error: String(err) };
     }
-
-    const now = new Date().toISOString();
-    db.prepare(
-      'INSERT INTO executor_procs (session_id, agent_id, task_id, pid, proc_type, started_at) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run(ctx.executionId, node.id, node.id, spawnedProc.pid, 'agent', now);
-
-    return { status: 'running', outputJson: { pid: spawnedProc.pid, promptFile } };
   }
 }

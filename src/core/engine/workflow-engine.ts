@@ -134,9 +134,12 @@ export class WorkflowEngine {
       try {
         const result = await executor.execute({
           node, workflowId: def.id, runId: exec.run_id, executionId: exec.id,
-          stateStore: this.stateStore, artifactStore: this.artifactStore,
+          stateStore: this.stateStore, artifactStore: this.artifactStore, backend: this.backend,
           config: {} as any, notificationBus: this.notificationBus as any, projectRoot: this.projectRoot,
         });
+        if (result.status === 'running' && result.outputJson?.handle) {
+          this.activeRun!.handles.set(exec.id, result.outputJson.handle as WorkerHandle);
+        }
         if (result.status !== 'running' && result.status !== 'waiting_human') {
           this.writeNodeExecRowStatus(exec.id, result.status, now, now, result.error);
         }
