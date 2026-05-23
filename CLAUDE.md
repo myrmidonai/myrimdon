@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current State
 
-The project is being **rebuilt from scratch against PRD6** (the previous TS scaffold was intentionally deleted; it survives only in git history). **M0 (Foundation) is implemented and merged to `dev`.**
+The project is being **rebuilt from scratch against PRD6** (the previous TS scaffold was intentionally deleted; it survives only in git history). **M0 (Foundation) and M1 (static execution core) are implemented on `dev`.**
 
 - **`dev`** is the active development branch — do all code work here.
 - **`main`** holds the docs/specs (PRD6, plans) as the stable line.
-- What exists today: a Go control-plane + runner that register over a Connect/gRPC network protocol, a SQLite event-log `StateStore`, and a `myrmidon status` CLI. See "Repo layout" below.
+- What exists today: a Go control-plane + runner (Connect/gRPC) with a SQLite event-log `StateStore` and `myrmidon status` CLI (M0); plus a **data-driven static-DAG workflow engine** — `WorkflowDef` load/validate, event-sourced scheduling (edge conditions, AND-join, branching/parallel), `ArtifactStore` + validators (artifacts-are-truth), a fixture-driven mock executor, crash-recovery + reconciliation, bounded autonomy (retry→pause), `human_approval` pause/resume + review API, and the `software-dev-agile` template running end-to-end (M1a–e). See "Repo layout".
 
 ## Source-of-Truth Documents
 
@@ -125,6 +125,8 @@ Because v1 already has a networked control plane + cross-machine runners, these 
 
 ## Roadmap & Open Decisions
 
-Milestones (PRD6 §21): **M0 ✅ done** → M1 static execution core (PRD4 MVP on the new base) → M2 members + IM channels → M3 authoring surfaces → M4 multi-runner + real executors → M5 cloud profile. M1's first real executor adapter will target **`pi --rpc`** (PRD6 §28).
+Milestones (PRD6 §21): **M0 ✅** → **M1 ✅** (static execution core: engine + artifacts + reconciliation + bounded autonomy + template) → **M2 next** (members + IM channels) → M3 authoring surfaces → M4 multi-runner + real executors (first adapter targets **`pi --rpc`**, PRD6 §28) → M5 cloud profile.
 
-**Open strategic decisions before M1 (PRD6 §27):** **R1** wedge vs full-v1 scope; **R2** build M1's durable-execution core on Temporal/LangGraph vs all-Go-from-scratch (this directly shapes M1); **R3** primary market. M1 is gated on R2 — settle it first.
+**Open decisions (PRD6 §27):** **R2 resolved** — all-Go on the event-sourcing path (no Temporal/LangGraph; their workflow-as-code model doesn't fit our data-driven DAG, and event-sourcing already gives crash recovery). Still open (product, not blocking M2): **R1** wedge vs full-v1 scope; **R3** primary market.
+
+**Known M1 deferrals:** real subprocess/cross-machine executor dispatch (M4; `ExecutionBackend` interface deferred until then); the qa→bug-fix **cyclic loop** needs a `loop` node type (PRD6 §4.2); output-similarity detection (PRD6 §9.4); networked `review` CLI (review currently via the engine API).
