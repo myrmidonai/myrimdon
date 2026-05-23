@@ -24,10 +24,11 @@ type ArtifactRef struct {
 }
 
 type Node struct {
-	ID       string        `json:"id"`
-	Type     NodeType      `json:"type"`
-	Name     string        `json:"name,omitempty"`
-	Produces []ArtifactRef `json:"produces,omitempty"`
+	ID          string        `json:"id"`
+	Type        NodeType      `json:"type"`
+	Name        string        `json:"name,omitempty"`
+	Produces    []ArtifactRef `json:"produces,omitempty"`
+	MaxAttempts int           `json:"maxAttempts,omitempty"` // bounded retry (P6); default 1
 }
 
 type Edge struct {

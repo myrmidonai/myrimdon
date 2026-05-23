@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/myrmidonai/myrmidon/internal/statestore"
@@ -11,7 +12,6 @@ import (
 )
 
 // NodeExecutor runs a single node and reports a result ("success"|"failed").
-// M1a uses a stub; M1b dispatches to a runner via ExecutionBackend.
 type NodeExecutor interface {
 	Execute(ctx context.Context, runID string, node workflow.Node) (result string, err error)
 }
@@ -22,24 +22,78 @@ type Engine struct {
 
 func New(store statestore.StateStore) *Engine { return &Engine{store: store} }
 
-func (e *Engine) emit(ctx context.Context, runID, typ string, p nodePayload) error {
+// emit appends an event; returns whether it was newly appended (false = deduped).
+func (e *Engine) emit(ctx context.Context, runID, typ string, p nodePayload) (bool, error) {
 	payload, _ := json.Marshal(p)
-	key := runID + ":" + typ + ":" + p.NodeID
-	_, err := e.store.AppendEvent(ctx, statestore.Event{
+	key := runID + ":" + typ + ":" + p.NodeID + ":" + strconv.Itoa(p.Attempt)
+	return e.store.AppendEvent(ctx, statestore.Event{
 		ID:             uuid.NewString(),
 		Type:           typ,
 		IdempotencyKey: key,
 		PayloadJSON:    string(payload),
 	})
+}
+
+func maxAttempts(n workflow.Node) int {
+	if n.MaxAttempts > 0 {
+		return n.MaxAttempts
+	}
+	return 1
+}
+
+// countCompleted returns total completions and failed completions for a node.
+func countCompleted(events []statestore.Event, nodeID string) (total, failed int) {
+	for _, ev := range events {
+		if ev.Type != EvNodeCompleted {
+			continue
+		}
+		var p nodePayload
+		_ = json.Unmarshal([]byte(ev.PayloadJSON), &p)
+		if p.NodeID != nodeID {
+			continue
+		}
+		total++
+		if p.Result == "failed" {
+			failed++
+		}
+	}
+	return total, failed
+}
+
+func (e *Engine) runNode(ctx context.Context, runID string, n workflow.Node, attempt int, exec NodeExecutor) error {
+	if _, err := e.emit(ctx, runID, EvNodeStarted, nodePayload{NodeID: n.ID, Attempt: attempt}); err != nil {
+		return err
+	}
+	res, err := exec.Execute(ctx, runID, n)
+	if err != nil {
+		return fmt.Errorf("execute %s: %w", n.ID, err)
+	}
+	if res != "failed" {
+		res = "success"
+	}
+	_, err = e.emit(ctx, runID, EvNodeCompleted, nodePayload{NodeID: n.ID, Result: res, Attempt: attempt})
 	return err
 }
 
-// Run drives def to a terminal state using exec. Synchronous (M1a).
+func hasActiveOutEdge(def *workflow.Def, st RunState, nodeID string) bool {
+	for _, oe := range def.Outgoing(nodeID) {
+		if edgeActive(oe, st) {
+			return true
+		}
+	}
+	return false
+}
+
+// Run drives def toward a terminal state, emitting all transitions as events.
+// It is synchronous, idempotent, and resumable: re-invoking after a crash or a
+// human decision continues from the event log. The run ends either COMPLETED or
+// PAUSED (a human_approval awaiting a decision, or a node whose retries are
+// exhausted — P6: failure pauses for human, it does not abort).
 func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec NodeExecutor) error {
 	if err := def.Validate(); err != nil {
 		return fmt.Errorf("invalid workflow: %w", err)
 	}
-	if err := e.emit(ctx, runID, EvWorkflowStarted, nodePayload{}); err != nil {
+	if _, err := e.emit(ctx, runID, EvWorkflowStarted, nodePayload{}); err != nil {
 		return err
 	}
 	for {
@@ -50,68 +104,66 @@ func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec 
 		st := Project(def, events)
 		progressed := false
 		for _, n := range def.Nodes {
-			if st.Nodes[n.ID] == NodeRunning {
-				// Crash recovery: node was started but never completed → re-run
-				// (events are idempotent, so the duplicate NODE_STARTED is ignored).
-				if err := e.runNode(ctx, runID, n, exec); err != nil {
+			switch st.Nodes[n.ID] {
+			case NodeRunning:
+				total, _ := countCompleted(events, n.ID)
+				if err := e.runNode(ctx, runID, n, total+1, exec); err != nil {
 					return err
 				}
 				progressed = true
-				continue
-			}
-			switch nodeDecision(def, st, n.ID) {
-			case decReady:
-				if err := e.runNode(ctx, runID, n, exec); err != nil {
-					return err
+			case NodeFailed:
+				total, failed := countCompleted(events, n.ID)
+				switch {
+				case failed < maxAttempts(n):
+					if err := e.runNode(ctx, runID, n, total+1, exec); err != nil {
+						return err
+					}
+					progressed = true
+				case !hasActiveOutEdge(def, st, n.ID):
+					added, err := e.emit(ctx, runID, EvNodePaused, nodePayload{NodeID: n.ID})
+					if err != nil {
+						return err
+					}
+					progressed = progressed || added
 				}
-				progressed = true
-			case decSkip:
-				if err := e.emit(ctx, runID, EvNodeSkipped, nodePayload{NodeID: n.ID}); err != nil {
-					return err
+			case NodePending:
+				switch nodeDecision(def, st, n.ID) {
+				case decReady:
+					if n.Type == workflow.NodeHumanApproval {
+						added, err := e.emit(ctx, runID, EvHumanReviewRequested, nodePayload{NodeID: n.ID})
+						if err != nil {
+							return err
+						}
+						progressed = progressed || added
+					} else {
+						total, _ := countCompleted(events, n.ID)
+						if err := e.runNode(ctx, runID, n, total+1, exec); err != nil {
+							return err
+						}
+						progressed = true
+					}
+				case decSkip:
+					added, err := e.emit(ctx, runID, EvNodeSkipped, nodePayload{NodeID: n.ID})
+					if err != nil {
+						return err
+					}
+					progressed = progressed || added
 				}
-				progressed = true
 			}
 		}
 		if !progressed {
 			break
 		}
 	}
+
 	events, _ := e.store.ReadEvents(ctx, 0)
 	st := Project(def, events)
-	// The run fails only on an UNHANDLED failure: a failed node whose failure
-	// was not routed onward by an active outgoing edge (e.g. a `failed` edge to
-	// a bug-fix node). A handled failure is normal control flow, not a run failure.
-	for _, n := range def.Nodes {
-		if st.Nodes[n.ID] != NodeFailed {
-			continue
-		}
-		handled := false
-		for _, oe := range def.Outgoing(n.ID) {
-			if edgeActive(oe, st) {
-				handled = true
-				break
-			}
-		}
-		if !handled {
-			return e.emit(ctx, runID, EvWorkflowFailed, nodePayload{})
+	for _, s := range st.Nodes {
+		if s == NodePaused || s == NodeWaitingHuman {
+			_, err := e.emit(ctx, runID, EvWorkflowPaused, nodePayload{})
+			return err
 		}
 	}
-	return e.emit(ctx, runID, EvWorkflowCompleted, nodePayload{})
-}
-
-// runNode emits NODE_STARTED, executes the node, and emits NODE_COMPLETED.
-// Safe to call on a node already marked running (crash recovery): the duplicate
-// NODE_STARTED is ignored by the idempotent event log.
-func (e *Engine) runNode(ctx context.Context, runID string, n workflow.Node, exec NodeExecutor) error {
-	if err := e.emit(ctx, runID, EvNodeStarted, nodePayload{NodeID: n.ID}); err != nil {
-		return err
-	}
-	res, err := exec.Execute(ctx, runID, n)
-	if err != nil {
-		return fmt.Errorf("execute %s: %w", n.ID, err)
-	}
-	if res != "failed" {
-		res = "success"
-	}
-	return e.emit(ctx, runID, EvNodeCompleted, nodePayload{NodeID: n.ID, Result: res})
+	_, err := e.emit(ctx, runID, EvWorkflowCompleted, nodePayload{})
+	return err
 }
