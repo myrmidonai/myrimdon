@@ -17,6 +17,7 @@ type WorkflowResolver func(id string) (*workflow.Def, bool)
 
 type Coordinator struct {
 	Members  *members.Registry
+	Hub      *conversation.Hub
 	Engine   *engine.Engine
 	Executor engine.NodeExecutor
 	Resolve  WorkflowResolver

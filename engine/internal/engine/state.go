@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/myrmidonai/myrmidon/internal/statestore"
@@ -69,4 +70,13 @@ func Project(def *workflow.Def, events []statestore.Event) RunState {
 		}
 	}
 	return st
+}
+
+// State reads the event log and projects the current run state.
+func (e *Engine) State(ctx context.Context, def *workflow.Def) (RunState, error) {
+	events, err := e.store.ReadEvents(ctx, 0)
+	if err != nil {
+		return RunState{}, err
+	}
+	return Project(def, events), nil
 }
