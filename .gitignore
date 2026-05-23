@@ -13,3 +13,17 @@
 !/docs/**
 !/RFC/
 !/RFC/**
+
+# Go sources + generated code (M0)
+!/*.mod
+!/*.sum
+!/*.yaml
+!/Makefile
+!/cmd/
+!/cmd/**
+!/internal/
+!/internal/**
+!/schema/
+!/schema/**
+!/gen/
+!/gen/**
