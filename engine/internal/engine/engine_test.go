@@ -156,3 +156,31 @@ func mustEvents(t *testing.T, store statestore.StateStore) []statestore.Event {
 	}
 	return ev
 }
+
+func TestRunResumesRunningNode(t *testing.T) {
+	def := &workflow.Def{
+		ID: "wf",
+		Nodes: []workflow.Node{
+			{ID: "a", Type: workflow.NodeTrigger},
+			{ID: "b", Type: workflow.NodeAgent},
+		},
+		Edges: []workflow.Edge{{From: "a", To: "b", Condition: "success"}},
+	}
+	eng, store := newEngine(t)
+	ctx := context.Background()
+	// Simulate a crash: "a" was started but never completed.
+	_, _ = store.AppendEvent(ctx, statestore.Event{ID: "e1", Type: EvWorkflowStarted, IdempotencyKey: "run1:WORKFLOW_STARTED:"})
+	_, _ = store.AppendEvent(ctx, statestore.Event{ID: "e2", Type: EvNodeStarted, IdempotencyKey: "run1:NODE_STARTED:a", PayloadJSON: `{"node_id":"a"}`})
+
+	// Resume: Run is idempotent and re-runs the stuck node.
+	if err := eng.Run(ctx, "run1", def, scriptExecutor{}); err != nil {
+		t.Fatalf("Run (resume): %v", err)
+	}
+	st := Project(def, mustEvents(t, store))
+	if st.Status != "completed" {
+		t.Fatalf("status: %v", st.Status)
+	}
+	if st.Nodes["a"] != NodeCompleted || st.Nodes["b"] != NodeCompleted {
+		t.Fatalf("nodes after resume: %+v", st.Nodes)
+	}
+}

@@ -50,19 +50,18 @@ func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec 
 		st := Project(def, events)
 		progressed := false
 		for _, n := range def.Nodes {
-			switch nodeDecision(def, st, n.ID) {
-			case decReady:
-				if err := e.emit(ctx, runID, EvNodeStarted, nodePayload{NodeID: n.ID}); err != nil {
+			if st.Nodes[n.ID] == NodeRunning {
+				// Crash recovery: node was started but never completed → re-run
+				// (events are idempotent, so the duplicate NODE_STARTED is ignored).
+				if err := e.runNode(ctx, runID, n, exec); err != nil {
 					return err
 				}
-				res, err := exec.Execute(ctx, runID, n)
-				if err != nil {
-					return fmt.Errorf("execute %s: %w", n.ID, err)
-				}
-				if res != "failed" {
-					res = "success"
-				}
-				if err := e.emit(ctx, runID, EvNodeCompleted, nodePayload{NodeID: n.ID, Result: res}); err != nil {
+				progressed = true
+				continue
+			}
+			switch nodeDecision(def, st, n.ID) {
+			case decReady:
+				if err := e.runNode(ctx, runID, n, exec); err != nil {
 					return err
 				}
 				progressed = true
@@ -98,4 +97,21 @@ func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec 
 		}
 	}
 	return e.emit(ctx, runID, EvWorkflowCompleted, nodePayload{})
+}
+
+// runNode emits NODE_STARTED, executes the node, and emits NODE_COMPLETED.
+// Safe to call on a node already marked running (crash recovery): the duplicate
+// NODE_STARTED is ignored by the idempotent event log.
+func (e *Engine) runNode(ctx context.Context, runID string, n workflow.Node, exec NodeExecutor) error {
+	if err := e.emit(ctx, runID, EvNodeStarted, nodePayload{NodeID: n.ID}); err != nil {
+		return err
+	}
+	res, err := exec.Execute(ctx, runID, n)
+	if err != nil {
+		return fmt.Errorf("execute %s: %w", n.ID, err)
+	}
+	if res != "failed" {
+		res = "success"
+	}
+	return e.emit(ctx, runID, EvNodeCompleted, nodePayload{NodeID: n.ID, Result: res})
 }
