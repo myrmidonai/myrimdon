@@ -17,6 +17,7 @@
 # Monorepo components (polyglot: Go engine + TS web/sdk + desktop + shared schema)
 !/*.mod
 !/*.sum
+!/*.work
 !/*.yaml
 !/Makefile
 !/schema/
