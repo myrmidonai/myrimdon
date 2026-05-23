@@ -15,7 +15,11 @@ func edgeActive(e workflow.Edge, st RunState) bool {
 		return s == NodeCompleted && st.Results[e.From] == "success"
 	case "failed":
 		return s == NodeFailed || st.Results[e.From] == "failed"
-	default: // approved|rejected — resolved by human_approval (M1d); inactive here
+	case "approved":
+		return s == NodeCompleted && st.Results[e.From] == "approved"
+	case "rejected":
+		return s == NodeCompleted && st.Results[e.From] == "rejected"
+	default:
 		return false
 	}
 }

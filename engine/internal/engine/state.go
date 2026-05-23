@@ -10,11 +10,13 @@ import (
 type NodeStatus string
 
 const (
-	NodePending   NodeStatus = "pending"
-	NodeRunning   NodeStatus = "running"
-	NodeCompleted NodeStatus = "completed"
-	NodeFailed    NodeStatus = "failed"
-	NodeSkipped   NodeStatus = "skipped"
+	NodePending      NodeStatus = "pending"
+	NodeRunning      NodeStatus = "running"
+	NodeCompleted    NodeStatus = "completed"
+	NodeFailed       NodeStatus = "failed"
+	NodeSkipped      NodeStatus = "skipped"
+	NodeWaitingHuman NodeStatus = "waiting_human"
+	NodePaused       NodeStatus = "paused" // retries exhausted → awaiting human guidance
 )
 
 type RunState struct {
@@ -48,10 +50,22 @@ func Project(def *workflow.Def, events []statestore.Event) RunState {
 			st.Results[p.NodeID] = p.Result
 		case EvNodeSkipped:
 			st.Nodes[p.NodeID] = NodeSkipped
+		case EvNodePaused:
+			st.Nodes[p.NodeID] = NodePaused
+		case EvHumanReviewRequested:
+			st.Nodes[p.NodeID] = NodeWaitingHuman
+		case EvHumanApproved:
+			st.Nodes[p.NodeID] = NodeCompleted
+			st.Results[p.NodeID] = "approved"
+		case EvHumanRejected:
+			st.Nodes[p.NodeID] = NodeCompleted
+			st.Results[p.NodeID] = "rejected"
 		case EvWorkflowCompleted:
 			st.Status = "completed"
 		case EvWorkflowFailed:
 			st.Status = "failed"
+		case EvWorkflowPaused:
+			st.Status = "paused"
 		}
 	}
 	return st

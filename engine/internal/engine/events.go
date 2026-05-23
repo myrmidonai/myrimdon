@@ -9,13 +9,21 @@ const (
 	EvNodeSkipped       = "NODE_SKIPPED"
 	EvWorkflowCompleted = "WORKFLOW_COMPLETED"
 	EvWorkflowFailed    = "WORKFLOW_FAILED"
+	EvWorkflowPaused    = "WORKFLOW_PAUSED"
+	EvNodePaused        = "NODE_PAUSED" // retries exhausted → pause_for_human (P6)
 	EvArtifactProduced  = "ARTIFACT_PRODUCED"
 	EvArtifactValidated = "ARTIFACT_VALIDATED"
+
+	EvHumanReviewRequested = "HUMAN_REVIEW_REQUESTED"
+	EvHumanApproved        = "HUMAN_APPROVED"
+	EvHumanRejected        = "HUMAN_REJECTED"
 )
 
 type nodePayload struct {
-	NodeID string `json:"node_id"`
-	Result string `json:"result,omitempty"` // "success"|"failed" for NODE_COMPLETED
+	NodeID   string `json:"node_id"`
+	Result   string `json:"result,omitempty"`   // "success"|"failed" for NODE_COMPLETED
+	Attempt  int    `json:"attempt,omitempty"`   // retry attempt (1-based)
+	Feedback string `json:"feedback,omitempty"`  // structured rejection feedback (P6/§9.3)
 }
 
 type artifactPayload struct {
