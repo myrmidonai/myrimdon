@@ -78,6 +78,8 @@ export class WorkflowEngine {
       if (!isUpstreamComplete(def, node.id, statusMap)) continue;
       if (!await this.inputArtifactsReady(runId, node.id, def)) continue;
       await this.dispatchNode(exec, node, def);
+      // Update status map so downstream nodes can be dispatched in the same tick
+      statusMap.set(node.id, node.type === 'trigger' ? 'completed' : 'running');
     }
 
     // Poll running nodes via heartbeat
@@ -208,7 +210,8 @@ export class WorkflowEngine {
       .run(status, startedAt ?? null, completedAt ?? null, error ?? null, id);
   }
   private writeArtifactRow(id: string, workflowId: string, runId: string, nodeId: string, filePath: string, status: string, now: string) {
-    this.db.prepare('INSERT OR IGNORE INTO artifacts (id,workflow_id,run_id,node_id,file_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+    // Use REPLACE so each new run overwrites the projection (events table is the source of truth)
+    this.db.prepare('INSERT OR REPLACE INTO artifacts (id,workflow_id,run_id,node_id,file_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
       .run(id, workflowId, runId, nodeId, filePath, status, now, now);
   }
   private writeArtifactStatus(id: string, runId: string, status: string, now: string) {

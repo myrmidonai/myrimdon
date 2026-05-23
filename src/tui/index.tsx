@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { render, Box, Text, useInput } from 'ink';
+import { render, Box, Text, useInput, useApp } from 'ink';
 import type Database from 'better-sqlite3';
 import { OverviewTab } from './tabs/overview.js';
 import { ReviewQueueTab } from './tabs/review-queue.js';
@@ -14,17 +14,22 @@ const TAB_LABELS: Record<Tab, string> = {
   overview: '1:Overview', review: '2:Review', logs: '3:Logs', cron: '4:Cron', config: '5:Config',
 };
 
-interface AppProps { db: Database.Database; stateStore: StateStore }
+interface AppProps { db: Database.Database; stateStore: StateStore; onExit?: (() => void) | undefined }
 
-function App({ db, stateStore }: AppProps) {
+function App({ db, stateStore, onExit }: AppProps) {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const { exit } = useApp();
 
-  useInput((input) => {
+  useInput((input, key) => {
     if (input === '1') setActiveTab('overview');
     if (input === '2') setActiveTab('review');
     if (input === '3') setActiveTab('logs');
     if (input === '4') setActiveTab('cron');
     if (input === '5') setActiveTab('config');
+    if (input === 'q' || key.escape) {
+      if (onExit) onExit();
+      exit();
+    }
   });
 
   return (
@@ -37,6 +42,9 @@ function App({ db, stateStore }: AppProps) {
             </Text>
           </Box>
         ))}
+        <Box marginLeft={2}>
+          <Text color="gray">[q] quit</Text>
+        </Box>
       </Box>
       <Box flexGrow={1} padding={1}>
         {activeTab === 'overview' && <OverviewTab db={db} />}
@@ -49,6 +57,20 @@ function App({ db, stateStore }: AppProps) {
   );
 }
 
-export function startTUI(db: Database.Database, stateStore: StateStore) {
-  render(<App db={db} stateStore={stateStore} />);
+export function startTUI(db: Database.Database, stateStore: StateStore, onExit?: () => void) {
+  // Ensure stdin is in raw mode for keyboard input (needed on Windows)
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+  }
+
+  const app = render(<App db={db} stateStore={stateStore} onExit={onExit} />);
+
+  // Restore stdin on exit
+  app.waitUntilExit().then(() => {
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+    }
+  });
 }
