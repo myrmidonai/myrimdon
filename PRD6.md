@@ -649,3 +649,84 @@ trigger → requirements(pm) → prd(pm) → [prd-approval:human]
 | PRD5 P5-8 可视化、P5-5 连接器列 v2/v3 | **提前**：可视化编辑器为核心；至少一个 IM 连接器为核心 |
 
 **P7 反模式复核**：聊天是上层作者面、执行恒静态 → 「LLM 决定流程」未破；数字人默认 `workflow-only` → 「agent 自报完成」由 validator 裁决；其余原样保留。
+
+---
+
+## 25. 市场与竞争分析
+
+> *本章为 2026-05 web 调研结论的归档。它不改变 §1–§24 的技术架构，而是给出落地前必须正视的市场时点与竞争格局，并据此提出战略取舍（见 §26–§27）。数据随市场快速变化，引用日期以来源为准。*
+
+### 25.1 市场时点（痛点已被验证 —— 最大利好）
+
+- AI agent 市场 2026 ≈ **$9–11B**，CAGR ~45–50%（2030 ~$50B）；Gartner 称 2026 是企业 AI 支出「拐点年」（总 AI 支出 ~$2.59T）。
+- **决定性数据**：**79% 企业已采用 agent，仅 11% 真正上生产**；Gartner 预测**到 2027 年 >40% 的 agentic 项目会被砍**，原因是「价值不清、成本失控、治理薄弱」。
+- 治理缺口被量化：63% 无法对 agent 强制目的限制、60% 无法快速终止失控 agent、33% 缺审计级日志；EU AI Act 罚则 €35M / 7% 营收。
+
+> **「11% 生产 / 治理鸿沟」就是 Myrmidon 的命脉。** 「artifact 即真相 + 验证决定完成 + 有界自治 + 不可删审计 + 静态可复现 DAG」正对着全市场最大的未满足需求：**可治理、可复现、能上生产**。对外定位应是「跨越生产鸿沟 / 可治理可复现的 agent 执行」，而非「通用工作流运行时」。
+
+### 25.2 竞争地图（门槛极高 —— 清醒认知）
+
+| Myrmidon 的能力 | 已被谁规模化占据 | 含义 |
+|---|---|---|
+| 持久执行/崩溃恢复/重放 | **Temporal**（$300M D 轮/$5B/3000+ 客户，已出 Durable AI Agent Bundle + OpenAI/Vercel/Google ADK 集成）；**LangGraph 1.0**（durable execution + time-travel，Uber/Klarna/JPM 在用）| **事件溯源+重放不再新颖，是 table stakes。** 不应从零重造 Temporal/LangGraph 级持久执行（见 §27 R2）|
+| 人在回路（HITL）| **LangGraph 1.0** 将 pause/approve/modify 做成头牌特性 | HITL 已商品化；差异在**深度**（产物验证/结构化反馈/reconciliation）非「有没有」|
+| 可视化工作流 + AI + 可审计 | **n8n**（$5.2B，SAP 注资并嵌入 Joule Studio，1.7M MAU，多 agent + MCP 节点）；中国 **Coze 扣子 Workflow 2.0**（可视化+AI 自动规划+多 agent+模型路由，免费/字节）| n8n/Coze 已是「可视化+AI+可审计」那个产品，可视化编辑器是正面竞争 |
+| 自治软件工程 | **Devin/Cognition**（$10.2B→传 $25B，收购 Windsurf）；**OpenHands**（开源/自托管/自带 key/本地沙箱/可查每步推理）；Claude Code；Cursor（$29B/$500M ARR）| 软件开发楔子会撞这些；**OpenHands 尤其占了「开源+自托管+自带 key+透明」生态位** |
+| 多 agent 编排 | LangGraph/CrewAI/MS Agent Framework/OpenAI Agents SDK/Google ADK；MCP+A2A 已进 Linux 基金会 | 框架层彻底商品化，「边界消融，未来是多框架组合」|
+| 细粒度 tracing | **LangSmith**（每节点 token/成本/时延）| 可观测层亦有现成赢家 |
+
+### 25.3 三条不舒服但重要的真相
+
+1. **持久执行已被商品化。** 用 Go 从零重造它，可能把稀缺精力花在 Temporal/LangGraph 已做透处（见 §27 R2 build-vs-buy）。
+2. **几乎每个单项都有融资 $1B+ 的在位者。** 能赢的是**组合 + 纪律**（世界状态对账 + 产物即真相 + 不允许幻觉完成）作为一个**治理姿态**，不是某个单点功能。
+3. **离 Myrmidon「形状」最近的是 OpenHands / Dify / Coze**（开源/自托管/自带 key/可视化）。差异点真实但微妙：**它们是「一次性任务执行器」，Myrmidon 是「持续维护世界状态的 reconciler」**（Runtime not Pipeline，§1.3）——此差异必须一句话讲清。
+
+### 25.4 来源（2026-05 调研）
+
+市场：tech-insider「Agentic AI Enterprise 2026」、saasultra「AI Agent Statistics 2026」、Gartner 2026 支出预测。竞品：Temporal Series D（xgrid / thenewstack）、LangChain「LangGraph 1.0」、PRNewswire「n8n $5.2B / SAP」、SiliconANGLE「Cognition $25B」、amplifilabs「Devin vs OpenHands」、gurusup「Best Multi-Agent Frameworks 2026」。治理：Kiteworks「AI Governance 2026」、Raconteur「Autonomous AI agents 2026」。中国：aigc.cn「扣子 Workflow」、coze.cn、IT之家「2026 企业级 AI 智能体选型」。
+
+---
+
+## 26. 差异化与战略定位
+
+### 26.1 一句话护城河
+
+> **“别人的 agent 跑完一个任务就结束；Myrmidon 持续维护一个可验证、可复现、可审计的世界状态——失败会收敛，完成由验证裁决，不靠 agent 自报。”**
+
+此定位对应市场第一痛点（生产/治理鸿沟），且是 Temporal（只给持久性）、n8n/Coze（只给可视化自动化）、Devin/OpenHands（一次性任务）都未正面占据的位置。
+
+### 26.2 对每个在位者的定位一句话
+
+| 对手 | Myrmidon 的差异 |
+|---|---|
+| Temporal | 不只是持久性，而是**产物即真相 + 验证决定完成** |
+| LangGraph | 我们是**带治理的运行时**，不是开发框架 |
+| n8n / Coze | 我们是**可复现的自治执行**，不是可视化自动化 |
+| Devin / OpenHands | 我们**持续维护世界状态一致性**，不是一次性任务 |
+
+### 26.3 推荐楔子（待 §27 R1 决策）
+
+**软件开发场景的「可治理、可复现自治执行」**。理由：自动验证最强（编译/测试/lint）、生产鸿沟痛点最尖、可走 OpenHands 式「开源+自托管+自带 key」绕开 SaaS 巨头、「世界状态对账 vs 一次性任务」差异最明显。
+
+### 26.4 主市场（待 §27 R3 决策）
+
+- **海外（建议主战场）**：开源 + 自带 key + 治理合规（SOC2 / EU AI Act），「可监管可复现」是真卖点，付费意愿高。
+- **国内**：Coze 免费 + 字节生态碾压，开发者 SaaS 付费意愿低；建议做开源社区，不做商业主战场。
+
+---
+
+## 27. 风险与开放问题（落地前待决策）
+
+> *以下为战略层未决项。在做出决策前，§3–§24 架构维持不变；这些决策可能促使后续修订（尤其 R1/R2 可能影响范围与 §15 实现路线）。*
+
+| # | 风险 / 开放问题 | 现状 | 建议方向 |
+|---|---|---|---|
+| **R1** | **范围 vs 资源**：「v1=全部」= 小团队同时硬撼六家 $1B+ | 当前 PRD6 = 全平台 v1 | **收敛为「楔子版 v1」**：软件开发可治理可复现执行核（≈M1），IM/可视化/多 runner/云降级为快速跟进 |
+| **R2** | **Build vs Buy 持久执行**：全 Go 从零造 Temporal 级能力可能浪费 | §4/§15 = 全 Go 从零 | 认真评估**在 Temporal 或 LangGraph 之上**只做验证/对账/治理层；与「全 Go 从零」冲突，需重新拍板 |
+| **R3** | **主市场未定**（国内/海外）——决定 IM/模型/合规/支付/竞品全套 | PRD6 混用企业微信+Slack、Kimi+Claude | 主攻海外开源开发者/团队 |
+| **R4** | **ICP 与范围不匹配**：早期用户「独立开发者/小团队」不需要多 runner/多 human/跨渠道同步 | §1.3 为部署层级，非 ICP | 定义首个「非用不可」ICP，与楔子范围对齐 |
+| **R5** | **法律最小集**：开源许可证未定；产物 IP/自治动作责任 ToS 缺；cloud profile 的数据驻留与 **GDPR 删除权 vs append-only**（crypto-shredding 原列 v3，cloud 上线即 v2 问题）；SOC2；v1 无 OS 级沙箱 | 未规划 | 落地前定许可证 + ToS；删除权方案前移；cloud profile 前补 SOC2/沙箱 |
+| **R6** | **商业计划层缺失**：无 GTM、无单位经济、无竞争定位落地、无商业里程碑 | PRD6 = 工程规格 | 补「商业里程碑」（首个真实工作流→首个外部自托管用户→首个付费）与 M0–M5 并列 |
+| **R7** | **外部依赖风险**：命脉绑在外部执行器 CLI（claude-code 等）的行为/定价/可用性 | §18 多运行时 | 多执行器抽象已缓解；保持 ≥2 个可用执行器 + mock |
+
+**底线**：作为**技术架构**，PRD6 成熟可落地；作为**可 all-in 的商业方案**，需先解 R1（楔子）、R2（build-vs-buy）、R3（主市场）。最该改的一件事是 R1——把「v1=全部」收敛为「软件开发的可治理可复现自治执行核」。
