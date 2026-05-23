@@ -14,16 +14,18 @@
 !/RFC/
 !/RFC/**
 
-# Go sources + generated code (M0)
+# Monorepo components (polyglot: Go engine + TS web/sdk + desktop + shared schema)
 !/*.mod
 !/*.sum
 !/*.yaml
 !/Makefile
-!/cmd/
-!/cmd/**
-!/internal/
-!/internal/**
 !/schema/
 !/schema/**
-!/gen/
-!/gen/**
+!/engine/
+!/engine/**
+!/web/
+!/web/**
+!/sdk/
+!/sdk/**
+!/desktop/
+!/desktop/**

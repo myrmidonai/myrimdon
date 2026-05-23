@@ -36,13 +36,15 @@ A **general-purpose autonomous workflow runtime** — not a pipeline. Users decl
 - Network contract: **protobuf in `schema/`** → codegen via **buf + Connect** (`connectrpc.com/connect`).
 - Persistence: **pure-Go SQLite** (`modernc.org/sqlite`, no cgo) behind the `StateStore` interface; migrations via **goose** (embedded), queries via **sqlc**.
 
-```bash
-make gen      # buf generate (schema/) + sqlc generate  → regenerates gen/ and internal/statestore/db/
-make test     # go test ./...
-make build    # go build ./cmd/...
-make tidy     # go mod tidy
+All Go work lives in **`./engine`**. The root `Makefile` targets work on Linux/macOS/CI; on **Windows (no `make`)** run the raw equivalents shown:
 
-go test ./internal/statestore/ -run TestIdempotentAppend -v   # single test
+```bash
+make gen     # = (cd schema && buf generate) ; (cd engine && sqlc generate)
+make test    # = cd engine && go test ./...
+make build   # = cd engine && go build ./cmd/...
+make tidy    # = cd engine && go mod tidy
+
+cd engine && go test ./internal/statestore/ -run TestIdempotentAppend -v   # single test
 ```
 
 **One-time tool install** (Go-installed; `$(go env GOPATH)/bin` must be on PATH):
@@ -57,21 +59,28 @@ go install github.com/pressly/goose/v3/cmd/goose@latest
 
 **CN network:** this machine uses `go env -w GOPROXY=https://goproxy.cn,direct GOSUMDB=off` (sum.golang.org TLS times out otherwise).
 
-**Run locally:** `go run ./cmd/controlplane` (listens `127.0.0.1:9100`, env `MYRMIDON_CP_ADDR`/`MYRMIDON_DB`); `go run ./cmd/runner` (registers + heartbeats, env `MYRMIDON_CP_URL`/`MYRMIDON_RUNNER_ID`); `go run ./cmd/myrmidon status`.
+**Run locally (from `./engine`):** `go run ./cmd/controlplane` (listens `127.0.0.1:9100`, env `MYRMIDON_CP_ADDR`/`MYRMIDON_DB`); `go run ./cmd/runner` (registers + heartbeats, env `MYRMIDON_CP_URL`/`MYRMIDON_RUNNER_ID`); `go run ./cmd/myrmidon status`.
 
 ## Repo Layout
 
+Polyglot monorepo. The Go module is rooted at `/engine` (module path stays `github.com/myrmidonai/myrmidon`, so package imports are `github.com/myrmidonai/myrmidon/internal/...`). `/schema` is shared (Go + TS both codegen from it). `/web`, `/sdk`, `/desktop` are placeholders for later milestones.
+
 ```
-schema/                  protobuf contract (buf.yaml, buf.gen.yaml, proto/myrmidon/v1/control.proto)
-gen/                     GENERATED Connect/proto Go (do not hand-edit; run `make gen`)
-internal/statestore/     StateStore iface + SQLite impl; migrations/ (goose), queries/ (sqlc), db/ (generated)
-internal/registry/       RunnerRegistry — runner domain logic, projected from the event log
-internal/server/         Connect RunnerService handler (adapts registry; no persistence logic)
-internal/runneragent/    runner-side register + heartbeat client
-internal/integration/    cross-component gate tests
-cmd/controlplane/        control-plane binary (StateStore + registry + Connect server over h2c)
-cmd/runner/              runner binary
-cmd/myrmidon/            CLI (`status`)
+schema/                      SHARED protobuf contract (buf.yaml, buf.gen.yaml, proto/myrmidon/v1/control.proto)
+engine/                      Go module (control-plane + runner + cli)
+  go.mod  sqlc.yaml
+  gen/                       GENERATED Connect/proto Go (do not hand-edit; run `make gen`)
+  internal/statestore/       StateStore iface + SQLite impl; migrations/ (goose), queries/ (sqlc), db/ (generated)
+  internal/registry/         RunnerRegistry — runner domain logic, projected from the event log
+  internal/server/           Connect RunnerService handler (adapts registry; no persistence logic)
+  internal/runneragent/      runner-side register + heartbeat client
+  internal/integration/      cross-component gate tests
+  cmd/controlplane/          control-plane binary (StateStore + registry + Connect server over h2c)
+  cmd/runner/                runner binary
+  cmd/myrmidon/              CLI (`status`)
+web/                         placeholder — Vite/React SPA (visual editor + chat), M2/M3
+sdk/                         placeholder — TS SDK (emits WorkflowDef JSON), optional/later
+desktop/                     placeholder — Tauri/Electron shell embedding the Go binaries, later
 ```
 
 **Boundary discipline (PRD6 §28, learned from the DeepSeek-TUI "god-crate"):** each package has one responsibility — `statestore` = persistence only, `registry` = domain logic only (talks to `StateStore`, never raw SQL), `server` = RPC mapping only, `cmd/*` = thin wiring. Keep it that way.

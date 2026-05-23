@@ -6,8 +6,8 @@ managed:
       value: github.com/myrmidonai/myrmidon/gen
 plugins:
   - local: protoc-gen-go
-    out: ../gen
+    out: ../engine/gen
     opt: paths=source_relative
   - local: protoc-gen-connect-go
-    out: ../gen
+    out: ../engine/gen
     opt: paths=source_relative

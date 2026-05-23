@@ -1,14 +1,15 @@
 .PHONY: gen test build tidy
 
+# Regenerate the protobuf contract (Go) and sqlc queries.
 gen:
 	cd schema && buf generate
-	sqlc generate
+	cd engine && sqlc generate
 
 test:
-	go test ./...
+	cd engine && go test ./...
 
 build:
-	go build ./cmd/...
+	cd engine && go build ./cmd/...
 
 tidy:
-	go mod tidy
+	cd engine && go mod tidy
