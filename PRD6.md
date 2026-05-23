@@ -730,3 +730,30 @@ trigger → requirements(pm) → prd(pm) → [prd-approval:human]
 | **R7** | **外部依赖风险**：命脉绑在外部执行器 CLI（claude-code 等）的行为/定价/可用性 | §18 多运行时 | 多执行器抽象已缓解；保持 ≥2 个可用执行器 + mock |
 
 **底线**：作为**技术架构**，PRD6 成熟可落地；作为**可 all-in 的商业方案**，需先解 R1（楔子）、R2（build-vs-buy）、R3（主市场）。最该改的一件事是 R1——把「v1=全部」收敛为「软件开发的可治理可复现自治执行核」。
+
+---
+
+## 28. 参考实现（外部开源项目借鉴）
+
+> *2026-05 调研了两个已克隆的开源项目（`.github/DeepSeek-TUI` = Rust 编码 agent，Codex/OpenCode 血统；`.github/pi` = TS agent harness）。下表记录可直接借鉴的模式与来源路径，供实现时查阅。*
+
+| 模式 | 借鉴自 | 来源路径 | 用于 Myrmidon |
+|---|---|---|---|
+| npm 分发原生二进制（postinstall 下载 Release + checksum + spawn 壳）| DeepSeek-TUI | `npm/deepseek-tui/scripts/{install,run,artifacts}.js` | `npx` 分发 Go 二进制（与语言无关）|
+| 分层命令门控（Builtin<Agent<User，最长前缀 allow/deny）| DeepSeek-TUI | `crates/execpolicy/` | ExecutorAgentSpec 的 `allowedTools/forbiddenActions` |
+| ToolSpec（`approval`/`supports_parallel`/`read_only`）+ 目录记忆化保 KV-cache 稳定 | DeepSeek-TUI | `crates/tui/src/tools/spec.rs`,`tools/registry.rs` | 工具硬约束字段 |
+| MCP per-server `enabled/disabled_tools` + secret 脱敏 | DeepSeek-TUI | `crates/tui/src/mcp.rs` | MCP 白名单 |
+| 沙箱后端抽象（seatbelt/landlock/JobObject）| DeepSeek-TUI | `crates/tui/src/sandbox/` | 执行隔离（v2+）；**Windows 仅进程树** |
+| JSON-RPC 2.0 app-server（HTTP+stdio，Envelope 帧）| DeepSeek-TUI | `crates/app-server/` | 网络协议参考 |
+| **runner↔执行器 JSONL/stdio RPC**（prompt/steer/abort/get_state + 人工审批旁路）| pi | `packages/coding-agent/src/modes/rpc/rpc-types.ts` | **ExecutionBackend 协议；可直接对接 `pi --rpc` 作首个真实执行器** |
+| agent loop 事件分类 + hook 契约（`beforeToolCall` block / `afterToolCall` override / hook 永不抛）| pi | `packages/agent/src/types.ts` | 事件溯源 + validator/工具门控 |
+| `SKILL.md`（Claude 兼容 frontmatter + 目录名校验 + `<skill>` 注入）| pi + DeepSeek-TUI | `packages/agent/src/harness/skills.ts`；复用 `~/.claude` | agent spec 的 skills |
+| 双层 config（项目 `.pi/` vs 全局 `~/.pi/agent/`，可白标）| pi | `packages/coding-agent/src/config.ts` | SDK/CLI 配置 |
+| 工程质量栈（Biome + tsgo + husky check 门 + 钉死依赖/shrinkwrap）| pi | `biome.json`,`.husky/`,`scripts/*.mjs` | TS SDK/UI 工程化 |
+
+**反面教材（避开）：**
+- **上帝 crate**：DeepSeek-TUI 14 个 crate 是门面，21.3 万行全堆在 `crates/tui/` → **强制 Go 包/crate 真实边界**。
+- **无界 history 落盘崩溃**（DeepSeek `AGENTS.md` 自承会话会退化崩溃）→ **反证我们事件溯源 + 有界/增量持久化 + 七层上下文管理是对的**。
+- pi 的 **build 顺序硬编码、无 MCP、全包锁步版本** → 我们用 TS project references；MCP 自建；SDK/UI/引擎独立版本。
+
+> **落地启示**：M1/M2 的「首个真实执行器适配器」可直接对接 `pi --rpc`（已具备 prompt/steer/abort/状态查询 + 人工审批旁路），省掉早期自研执行器；npm 分发壳与 SKILL.md 规范可整段移植。
