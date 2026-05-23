@@ -9,9 +9,19 @@ const (
 	EvNodeSkipped       = "NODE_SKIPPED"
 	EvWorkflowCompleted = "WORKFLOW_COMPLETED"
 	EvWorkflowFailed    = "WORKFLOW_FAILED"
+	EvArtifactProduced  = "ARTIFACT_PRODUCED"
+	EvArtifactValidated = "ARTIFACT_VALIDATED"
 )
 
 type nodePayload struct {
 	NodeID string `json:"node_id"`
 	Result string `json:"result,omitempty"` // "success"|"failed" for NODE_COMPLETED
+}
+
+type artifactPayload struct {
+	NodeID     string `json:"node_id"`
+	ArtifactID string `json:"artifact_id"`
+	Path       string `json:"path"`
+	SHA256     string `json:"sha256,omitempty"`
+	Passed     bool   `json:"passed,omitempty"`
 }
