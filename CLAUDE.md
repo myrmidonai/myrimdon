@@ -74,7 +74,16 @@ engine/                      Go module (control-plane + runner + cli)
   internal/registry/         RunnerRegistry — runner domain logic, projected from the event log
   internal/server/           Connect RunnerService handler (adapts registry; no persistence logic)
   internal/runneragent/      runner-side register + heartbeat client
-  internal/integration/      cross-component gate tests
+  internal/workflow/         WorkflowDef (DAG) load/validate + graph traversal (M1)
+  internal/engine/           event-sourced scheduler, drive loop, reconcile, bounded autonomy, review API (M1)
+  internal/artifact/         ArtifactStore (local FS + checksums) (M1)
+  internal/validate/         Validator interface + file-exists (M1)
+  internal/executor/         mock (fixture-driven) executor (M1)
+  internal/templates/        software-dev-agile workflow (domain content, M1)
+  internal/members/          instance member registry: human + digital-human (M2)
+  internal/conversation/     ConversationHub: event-sourced channels + @mention (M2)
+  internal/coordinator/      chat↔engine: @mention→workflow, approval surfacing + /approve cmd (M2)
+  internal/integration/      cross-component gate tests (M0–M2)
   cmd/controlplane/          control-plane binary (StateStore + registry + Connect server over h2c)
   cmd/runner/                runner binary
   cmd/myrmidon/              CLI (`status`)
@@ -125,7 +134,7 @@ Because v1 already has a networked control plane + cross-machine runners, these 
 
 ## Roadmap & Open Decisions
 
-Milestones (PRD6 §21): **M0 ✅** → **M1 ✅** (static execution core: engine + artifacts + reconciliation + bounded autonomy + template) → **M2 next** (members + IM channels) → M3 authoring surfaces → M4 multi-runner + real executors (first adapter targets **`pi --rpc`**, PRD6 §28) → M5 cloud profile.
+Milestones (PRD6 §21): **M0 ✅** → **M1 ✅** (static execution core) → **M2 backend ✅** (members, ConversationHub, @mention→workflow, approval-surfacing + `/approve` chat command; **web UI + external IM connector still pending** — frontend) → M3 authoring surfaces → M4 multi-runner + real executors (first adapter targets **`pi --rpc`**, PRD6 §28) → M5 cloud profile.
 
 **Open decisions (PRD6 §27):** **R2 resolved** — all-Go on the event-sourcing path (no Temporal/LangGraph; their workflow-as-code model doesn't fit our data-driven DAG, and event-sourcing already gives crash recovery). Still open (product, not blocking M2): **R1** wedge vs full-v1 scope; **R3** primary market.
 
