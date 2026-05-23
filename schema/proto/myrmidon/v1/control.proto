@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package myrmidon.v1;
+
+// RunnerService is how a machine runner registers with and heartbeats to the
+// control plane, and how clients query the set of registered runners.
+service RunnerService {
+  rpc Register(RegisterRequest) returns (RegisterResponse) {}
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse) {}
+}
+
+message RegisterRequest {
+  string runner_id = 1;   // stable id chosen by the runner (e.g. hostname-based)
+  string address = 2;     // where the control plane can reach the runner
+}
+message RegisterResponse {
+  bool ok = 1;
+}
+
+message HeartbeatRequest {
+  string runner_id = 1;
+}
+message HeartbeatResponse {
+  bool ok = 1;
+}
+
+message ListRunnersRequest {}
+message ListRunnersResponse {
+  repeated Runner runners = 1;
+}
+
+message Runner {
+  string runner_id = 1;
+  string address = 2;
+  int64 registered_at_unix_ms = 3;
+}
