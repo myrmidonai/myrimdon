@@ -85,10 +85,11 @@ func hasActiveOutEdge(def *workflow.Def, st RunState, nodeID string) bool {
 }
 
 // Run drives def toward a terminal state, emitting all transitions as events.
-// It is synchronous, idempotent, and resumable: re-invoking after a crash or a
-// human decision continues from the event log. The run ends either COMPLETED or
-// PAUSED (a human_approval awaiting a decision, or a node whose retries are
-// exhausted — P6: failure pauses for human, it does not abort).
+// Synchronous, idempotent, resumable. The run ends COMPLETED, or PAUSED when a
+// human_approval awaits a decision or a node's retries are exhausted (P6).
+//
+// It advances ONE action per iteration and re-projects, so each decision sees
+// fresh state (e.g. a node that just paused is non-terminal for its downstream).
 func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec NodeExecutor) error {
 	if err := def.Validate(); err != nil {
 		return fmt.Errorf("invalid workflow: %w", err)
@@ -102,56 +103,18 @@ func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec 
 			return err
 		}
 		st := Project(def, events)
-		progressed := false
+		acted := false
 		for _, n := range def.Nodes {
-			switch st.Nodes[n.ID] {
-			case NodeRunning:
-				total, _ := countCompleted(events, n.ID)
-				if err := e.runNode(ctx, runID, n, total+1, exec); err != nil {
-					return err
-				}
-				progressed = true
-			case NodeFailed:
-				total, failed := countCompleted(events, n.ID)
-				switch {
-				case failed < maxAttempts(n):
-					if err := e.runNode(ctx, runID, n, total+1, exec); err != nil {
-						return err
-					}
-					progressed = true
-				case !hasActiveOutEdge(def, st, n.ID):
-					added, err := e.emit(ctx, runID, EvNodePaused, nodePayload{NodeID: n.ID})
-					if err != nil {
-						return err
-					}
-					progressed = progressed || added
-				}
-			case NodePending:
-				switch nodeDecision(def, st, n.ID) {
-				case decReady:
-					if n.Type == workflow.NodeHumanApproval {
-						added, err := e.emit(ctx, runID, EvHumanReviewRequested, nodePayload{NodeID: n.ID})
-						if err != nil {
-							return err
-						}
-						progressed = progressed || added
-					} else {
-						total, _ := countCompleted(events, n.ID)
-						if err := e.runNode(ctx, runID, n, total+1, exec); err != nil {
-							return err
-						}
-						progressed = true
-					}
-				case decSkip:
-					added, err := e.emit(ctx, runID, EvNodeSkipped, nodePayload{NodeID: n.ID})
-					if err != nil {
-						return err
-					}
-					progressed = progressed || added
-				}
+			a, err := e.step(ctx, runID, def, st, events, n, exec)
+			if err != nil {
+				return err
+			}
+			if a {
+				acted = true
+				break
 			}
 		}
-		if !progressed {
+		if !acted {
 			break
 		}
 	}
@@ -166,4 +129,38 @@ func (e *Engine) Run(ctx context.Context, runID string, def *workflow.Def, exec 
 	}
 	_, err := e.emit(ctx, runID, EvWorkflowCompleted, nodePayload{})
 	return err
+}
+
+// step performs at most one state-advancing action on node n, returning whether
+// it acted (a new event was appended).
+func (e *Engine) step(ctx context.Context, runID string, def *workflow.Def, st RunState, events []statestore.Event, n workflow.Node, exec NodeExecutor) (bool, error) {
+	switch st.Nodes[n.ID] {
+	case NodeRunning:
+		// crash recovery: re-run the in-flight attempt
+		total, _ := countCompleted(events, n.ID)
+		return true, e.runNode(ctx, runID, n, total+1, exec)
+
+	case NodeFailed:
+		total, failed := countCompleted(events, n.ID)
+		if failed < maxAttempts(n) {
+			return true, e.runNode(ctx, runID, n, total+1, exec) // retry
+		}
+		if !hasActiveOutEdge(def, st, n.ID) {
+			return e.emit(ctx, runID, EvNodePaused, nodePayload{NodeID: n.ID}) // exhausted + unhandled → pause
+		}
+		return false, nil // failure routed by an active edge; nothing to do here
+
+	case NodePending:
+		switch nodeDecision(def, st, n.ID) {
+		case decReady:
+			if n.Type == workflow.NodeHumanApproval {
+				return e.emit(ctx, runID, EvHumanReviewRequested, nodePayload{NodeID: n.ID})
+			}
+			total, _ := countCompleted(events, n.ID)
+			return true, e.runNode(ctx, runID, n, total+1, exec)
+		case decSkip:
+			return e.emit(ctx, runID, EvNodeSkipped, nodePayload{NodeID: n.ID})
+		}
+	}
+	return false, nil
 }
